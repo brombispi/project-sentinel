@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass
@@ -11,3 +12,6 @@ class RecoverySession:
     """
 
     session_id: str
+    created_at: datetime
+    status: str
+    recovery_path: str

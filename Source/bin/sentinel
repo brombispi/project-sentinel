@@ -26,6 +26,8 @@ codex = Codex()
 session = create_session()
 
 print(f"Recovery Session : {session.session_id}")
+print(f"Session Status   : {session.status}")
+print(f"Created At       : {session.created_at}")
 
 print()
 

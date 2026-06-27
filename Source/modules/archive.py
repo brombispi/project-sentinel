@@ -1,14 +1,35 @@
+from datetime import datetime
+from pathlib import Path
+
 from core.session import RecoverySession
+from services.session_registry import SessionRegistry
+
+
+def create_recovery_folder(session_id: str) -> str:
+    """
+    Create the recovery folder for a session.
+    """
+
+    runtime_root = Path(__file__).resolve().parent.parent
+    recovery_path = runtime_root / "Recoveries" / session_id
+    recovery_path.mkdir(parents=True, exist_ok=True)
+
+    return str(recovery_path)
 
 
 def create_session():
     """
     Create a new recovery session.
-
-    At this stage, a session only contains
-    its unique identifier.
     """
 
+    registry = SessionRegistry()
+
+    session_id = registry.next_session_id()
+    recovery_path = create_recovery_folder(session_id)
+
     return RecoverySession(
-        session_id="TEMP"
+        session_id=session_id,
+        created_at=datetime.now(),
+        status="OPEN",
+        recovery_path=recovery_path
     )
