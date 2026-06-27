@@ -159,6 +159,7 @@ Every new subsystem must define:
 - one architecture role
 - one deployment method
 - one verification step
+- core objects must never exist in an invalid state
 
 ---
 
