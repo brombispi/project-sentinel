@@ -1,0 +1,13 @@
+#!/bin/bash
+
+echo "===================================="
+echo "        DRS-1 Recovery Station"
+echo "===================================="
+echo
+echo "Hostname : $(hostname)"
+echo "Operator : $(whoami)"
+echo "Kernel   : $(uname -r)"
+echo "Uptime   : $(uptime -p)"
+echo "Date     : $(date)"
+echo
+echo "Status   : ONLINE"
