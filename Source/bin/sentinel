@@ -9,6 +9,8 @@ sys.path.append(str(PROJECT_ROOT))
 from modules.argus import detect_devices
 from modules.aegis import evaluate
 from modules.oracle import create_strategy
+from modules.summary import print_summary
+from modules.archive import create_session
 from core.codex import Codex
 
 
@@ -18,8 +20,14 @@ print("Assessment Engine")
 print("==========================================")
 print()
 
+
 devices = detect_devices()
 codex = Codex()
+session = create_session()
+
+print(f"Recovery Session : {session.session_id}")
+
+print()
 
 for device in devices:
 
@@ -64,5 +72,7 @@ for device in devices:
 
     for step in strategy.steps:
         print(f"- {step}")
+    print()
+    print_summary(assessment, strategy)
 
     print("-" * 40)
