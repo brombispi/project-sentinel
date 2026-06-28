@@ -1,6 +1,6 @@
 from datetime import datetime
 from pathlib import Path
-
+from core.status import RecoveryStatus
 from modules.echo import log_info
 from core.session import RecoverySession
 from services.session_registry import SessionRegistry
@@ -31,7 +31,7 @@ def create_session():
     session = RecoverySession(
     session_id=session_id,
     created_at=datetime.now(),
-    status="OPEN",
+    status=RecoveryStatus.NEW,
     recovery_path=recovery_path,
     case_name=""
     )
