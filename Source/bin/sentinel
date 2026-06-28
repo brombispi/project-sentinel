@@ -14,6 +14,8 @@ from modules.summary import print_summary
 from modules.archive import create_session
 from modules.echo import log_info, log_warning
 from core.codex import Codex
+from core.status import RecoveryStatus
+from modules.session_manager import save_case, update_status
 
 
 print("==========================================")
@@ -35,6 +37,9 @@ log_info(
     "SENTINEL",
     f"Case name set: {session.case_name}"
 )
+
+session.status = RecoveryStatus.ASSESSING
+
 
 log_info(
     session,
@@ -87,11 +92,20 @@ codex = Codex()
 
 device = devices[selection - 1]
 
-# Evaluate device first to produce an assessment, then write the case manifest
 assessment = evaluate(device)
-write_case_manifest(session, device, assessment)
+
+session.status = RecoveryStatus.ASSESSING
+
+save_case(session, device, assessment)
 
 if assessment.decision.status == "STOP":
+    update_status(
+        session,
+        RecoveryStatus.ON_HOLD,
+        device,
+        assessment
+    )
+
     log_warning(
         session,
         "AEGIS",
