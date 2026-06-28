@@ -15,6 +15,7 @@ Objectives completed
 ✓ ARGUS integrated with ECHO
 ✓ Assessment lifecycle logged
 ✓ Audit log format standardized ([MODULE][LEVEL]) 
+✓ Deployment no longer overwrites runtime state
 
 
 

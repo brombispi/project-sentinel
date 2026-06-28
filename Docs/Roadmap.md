@@ -10,6 +10,7 @@ v0.1 Foundation ✅
 - [x] AEGIS evaluates safety
 - [x] ARGUS observes devices
 - [x] Verified on MacOS
+
 v0.2 Usable CLI
 - [ ] ARGUS selects target device
 - [ ] CLI command: sentinel scan
@@ -17,6 +18,7 @@ v0.2 Usable CLI
 - [ ] CLI command: sentinel plan
 - [x] ORACLE gives clear recovery plan
 - [x] AEGIS blocks unsafe targets
+
 v0.25 Recovery Assessment
 This is where Sentinel becomes genuinely useful before it images anything.
 - [x] One consolidated terminal report
@@ -25,6 +27,7 @@ This is where Sentinel becomes genuinely useful before it images anything.
 - [x] AEGIS safety evaluation
 - [x] CODEX recommendations
 - [x] Filesystem detection
+
 v0.3 Imaging
 - [x] Persistent recovery session numbers
 - [x] Recovery workplace creation
@@ -33,22 +36,27 @@ v0.3 Imaging
 - [ ] Never write to source device
 - [ ] Basic imaging report
 - [x] ARCHIVE module
+
 v0.4 Recovery Session
 - [ ] Customer/device metadata
+- [x] Preserve runtime state during deployment
 - [x] ECHO audit log
 - [ ] Integrate ECHO with all Sentinel modules
 - [ ] Session history
 - [ ] Exportable case notes
+
 v0.5 Reports
 - [ ] HERMES module
 - [ ] Customer-friendly report
 - [ ] Technical report
 - [ ] PDF export
+
 v0.6 Knowledge Expansion
 - [ ] More filesystem knowledge
 - [ ] SMART attribute knowledge
 - [ ] USB/storage risk rules
 - [ ] First real recovery case entries
+
 v1.0 Usable Product
 - [ ] Full scan → assess → plan → image workflow
 - [ ] Safe defaults
@@ -56,6 +64,7 @@ v1.0 Usable Product
 - [ ] Basic documentation
 - [ ] Tested on real external drives
 - [ ] DigiRettung-ready internal tool
+
 v1.0 Professional UX
 - [ ] Consistent terminology
 - [ ] Clear reports
