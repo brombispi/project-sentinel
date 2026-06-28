@@ -67,6 +67,11 @@ for device in devices:
         )
 
     strategy = create_strategy(assessment)
+    log_info(
+    session,
+    "ORACLE",
+    f"Strategy generated: {strategy.status} / {strategy.priority}"
+)
 
     print(f"Device     : {device.path}")
     print(f"Identity   : {device.model}")
