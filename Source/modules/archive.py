@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
+from modules.echo import log_event
 from core.session import RecoverySession
 from services.session_registry import SessionRegistry
 
@@ -27,9 +28,17 @@ def create_session():
     session_id = registry.next_session_id()
     recovery_path = create_recovery_folder(session_id)
 
-    return RecoverySession(
+    session = RecoverySession(
         session_id=session_id,
         created_at=datetime.now(),
         status="OPEN",
         recovery_path=recovery_path
     )
+    log_event(
+    session,
+    "ARCHIVE",
+    "INFO",
+    "Recovery session created."
+    )
+
+    return session

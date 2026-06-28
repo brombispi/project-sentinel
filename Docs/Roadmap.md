@@ -35,7 +35,7 @@ v0.3 Imaging
 - [x] ARCHIVE module
 v0.4 Recovery Workflow
 - [ ] Customer/device metadata
-- [ ] ECHO audit log
+- [x] ECHO audit log
 - [ ] Session history
 - [ ] Exportable case notes
 v0.5 Reports
