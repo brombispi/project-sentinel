@@ -16,6 +16,7 @@ from modules.echo import log_info, log_warning
 from core.codex import Codex
 from core.status import RecoveryStatus
 from modules.session_manager import save_case, update_status
+from modules.intake import collect_case_intake
 
 
 print("==========================================")
@@ -27,6 +28,7 @@ print()
 session = None
 case_name = input("Case name: ").strip()
 session = create_session()
+intake = collect_case_intake()
 
 session.case_name = case_name
 
@@ -36,6 +38,11 @@ log_info(
     session,
     "SENTINEL",
     f"Case name set: {session.case_name}"
+)
+log_info(
+    session,
+    "INTAKE",
+    "Recovery case intake completed."
 )
 
 session.status = RecoveryStatus.ASSESSING
@@ -96,15 +103,16 @@ assessment = evaluate(device)
 
 session.status = RecoveryStatus.ASSESSING
 
-save_case(session, device, assessment)
+save_case(session, device, assessment, intake=intake)
 
 if assessment.decision.status == "STOP":
     update_status(
-        session,
-        RecoveryStatus.ON_HOLD,
-        device,
-        assessment
-    )
+    session,
+    RecoveryStatus.ON_HOLD,
+    device,
+    assessment,
+    intake=intake
+)
 
     log_warning(
         session,
