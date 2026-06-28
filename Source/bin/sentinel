@@ -12,7 +12,7 @@ from modules.oracle import create_strategy
 from modules.summary import print_summary
 from modules.archive import create_session
 from core.codex import Codex
-
+from modules.echo import log_info
 
 print("==========================================")
 print("PROJECT SENTINEL")
@@ -21,9 +21,27 @@ print("==========================================")
 print()
 
 
-devices = detect_devices()
-codex = Codex()
 session = create_session()
+
+log_info(session, "SENTINEL", "Assessment started.")
+
+devices = detect_devices()
+device_count = len(devices)
+
+if device_count == 1:
+    log_info(
+        session,
+        "ARGUS",
+        f"Detected 1 storage device: {devices[0].path}"
+    )
+else:
+    log_info(
+        session,
+        "ARGUS",
+        f"Detected {device_count} storage devices."
+    )
+
+codex = Codex()
 
 print(f"Recovery Session : {session.session_id}")
 print(f"Session Status   : {session.status}")
@@ -78,3 +96,9 @@ for device in devices:
     print_summary(assessment, strategy)
 
     print("-" * 40)
+
+    log_info(
+    session,
+    "SENTINEL",
+    "Assessment completed."
+)

@@ -33,9 +33,10 @@ v0.3 Imaging
 - [ ] Never write to source device
 - [ ] Basic imaging report
 - [x] ARCHIVE module
-v0.4 Recovery Workflow
+v0.4 Recovery Session
 - [ ] Customer/device metadata
 - [x] ECHO audit log
+- [ ] Integrate ECHO with all Sentinel modules
 - [ ] Session history
 - [ ] Exportable case notes
 v0.5 Reports

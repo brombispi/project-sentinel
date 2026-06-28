@@ -31,3 +31,9 @@
 ## Diagnostic Workflow
 
 - Guided diagnostic interview with cross-reference between technician observations and ARGUS findings.
+
+## Deployment
+
+- Prevent deployment from overwriting runtime state files.
+- Exclude runtime data (state, logs, recoveries) from deployment.
+

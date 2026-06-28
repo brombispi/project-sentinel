@@ -1,7 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from modules.echo import log_event
+from modules.echo import log_info
 from core.session import RecoverySession
 from services.session_registry import SessionRegistry
 
@@ -34,10 +34,9 @@ def create_session():
         status="OPEN",
         recovery_path=recovery_path
     )
-    log_event(
+    log_info(
     session,
     "ARCHIVE",
-    "INFO",
     "Recovery session created."
     )
 
