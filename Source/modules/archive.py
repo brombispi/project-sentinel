@@ -29,10 +29,11 @@ def create_session():
     recovery_path = create_recovery_folder(session_id)
 
     session = RecoverySession(
-        session_id=session_id,
-        created_at=datetime.now(),
-        status="OPEN",
-        recovery_path=recovery_path
+    session_id=session_id,
+    created_at=datetime.now(),
+    status="OPEN",
+    recovery_path=recovery_path,
+    case_name=""
     )
     log_info(
     session,

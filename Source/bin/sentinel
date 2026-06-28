@@ -7,6 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from modules.argus import detect_devices
+from modules.manifest import write_case_manifest
 from modules.aegis import evaluate
 from modules.oracle import create_strategy
 from modules.summary import print_summary
@@ -21,7 +22,19 @@ print("Assessment Engine")
 print("==========================================")
 print()
 
+session = None
+case_name = input("Case name: ").strip()
 session = create_session()
+
+session.case_name = case_name
+
+if session.case_name == "":
+    session.case_name = session.session_id
+log_info(
+    session,
+    "SENTINEL",
+    f"Case name set: {session.case_name}"
+)
 
 log_info(
     session,
@@ -46,6 +59,7 @@ else:
     )
 
 print(f"Recovery Session : {session.session_id}")
+print(f"Case Name        : {session.case_name}")
 print(f"Session Status   : {session.status}")
 print(f"Created At       : {session.created_at}")
 print()
@@ -71,10 +85,11 @@ selection = int(input("> "))
 
 codex = Codex()
 
-
 device = devices[selection - 1]
 
+# Evaluate device first to produce an assessment, then write the case manifest
 assessment = evaluate(device)
+write_case_manifest(session, device, assessment)
 
 if assessment.decision.status == "STOP":
     log_warning(

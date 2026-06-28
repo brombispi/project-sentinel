@@ -15,3 +15,4 @@ class RecoverySession:
     created_at: datetime
     status: str
     recovery_path: str
+    case_name: str = ""
