@@ -11,8 +11,9 @@ from modules.aegis import evaluate
 from modules.oracle import create_strategy
 from modules.summary import print_summary
 from modules.archive import create_session
-from core.codex import Codex
 from modules.echo import log_info, log_warning
+from core.codex import Codex
+
 
 print("==========================================")
 print("PROJECT SENTINEL")
@@ -20,10 +21,13 @@ print("Assessment Engine")
 print("==========================================")
 print()
 
-
 session = create_session()
 
-log_info(session, "SENTINEL", "Assessment started.")
+log_info(
+    session,
+    "SENTINEL",
+    "Assessment started."
+)
 
 devices = detect_devices()
 device_count = len(devices)
@@ -46,7 +50,6 @@ codex = Codex()
 print(f"Recovery Session : {session.session_id}")
 print(f"Session Status   : {session.status}")
 print(f"Created At       : {session.created_at}")
-
 print()
 
 for device in devices:
@@ -67,11 +70,18 @@ for device in devices:
         )
 
     strategy = create_strategy(assessment)
+
     log_info(
-    session,
-    "ORACLE",
-    f"Strategy generated: {strategy.status} / {strategy.priority}"
-)
+        session,
+        "ORACLE",
+        f"Strategy generated: {strategy.status} / {strategy.priority}"
+    )
+
+    log_info(
+        session,
+        "CODEX",
+        f"Knowledge applied for: {device.filesystem}"
+    )
 
     print(f"Device     : {device.path}")
     print(f"Identity   : {device.model}")
