@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -130,18 +131,23 @@ def detect_devices():
     devices = []
 
     result = subprocess.run(
-        ["lsblk", "-d", "-o", "NAME,MODEL,SERIAL,SIZE,TRAN", "--noheadings"],
+        ["lsblk", "-d", "-J", "-o", "NAME,MODEL,SERIAL,SIZE,TRAN"],
         capture_output=True,
-        text=True
+        text=True,
+        check=True
     )
 
-    for line in result.stdout.strip().splitlines():
-        parts = line.split()
+    data = json.loads(result.stdout)
 
-        name = parts[0]
-        size = parts[-2]
-        transport = parts[-1]
-        model_serial = " ".join(parts[1:-2])
+    for item in data["blockdevices"]:
+        name = item.get("name", "")
+        model = item.get("model", "") or "Unknown"
+        serial = item.get("serial", "") or "Unknown"
+        size = item.get("size", "") or "Unknown"
+        transport = item.get("tran", "") or "Unknown"
+
+        if name == "":
+            continue
 
         if name == system_drive:
             role = "RECOVERY ENGINE"
@@ -157,8 +163,8 @@ def detect_devices():
 
         device = Device(
             name=name,
-            model=model_serial,
-            serial="",
+            model=model,
+            serial=serial,
             size=size,
             transport=transport,
             role=role,
@@ -187,7 +193,8 @@ if __name__ == "__main__":
         decision = assessment.decision
 
         print(f"Device      : {device.path}")
-        print(f"Identity    : {device.model}")
+        print(f"Model       : {device.model}")
+        print(f"Serial      : {device.serial}")
         print(f"Size        : {device.size}")
         print(f"Transport   : {device.transport}")
         print(f"Filesystem  : {device.filesystem}")
