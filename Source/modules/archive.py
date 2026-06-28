@@ -14,6 +14,12 @@ def create_recovery_folder(session_id: str) -> str:
     runtime_root = Path(__file__).resolve().parent.parent
     recovery_path = runtime_root / "Recoveries" / session_id
     recovery_path.mkdir(parents=True, exist_ok=True)
+    
+    (recovery_path / "images").mkdir(exist_ok=True)
+    (recovery_path / "recovered").mkdir(exist_ok=True)
+    (recovery_path / "exports").mkdir(exist_ok=True)
+    (recovery_path / "notes").mkdir(exist_ok=True)
+    (recovery_path / "reports").mkdir(exist_ok=True)
 
     return str(recovery_path)
 
