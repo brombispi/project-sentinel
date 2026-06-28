@@ -45,89 +45,109 @@ else:
         f"Detected {device_count} storage devices."
     )
 
-codex = Codex()
-
 print(f"Recovery Session : {session.session_id}")
 print(f"Session Status   : {session.status}")
 print(f"Created At       : {session.created_at}")
 print()
 
-for device in devices:
+print("Detected Storage Devices")
+print("=" * 40)
 
-    assessment = evaluate(device)
-
-    if assessment.decision.status == "STOP":
-        log_warning(
-            session,
-            "AEGIS",
-            f"Decision: STOP ({assessment.decision.reason})"
-        )
-    else:
-        log_info(
-            session,
-            "AEGIS",
-            f"Decision: {assessment.decision.status}"
-        )
-
-    strategy = create_strategy(assessment)
-
-    log_info(
-        session,
-        "ORACLE",
-        f"Strategy generated: {strategy.status} / {strategy.priority}"
-    )
-
-    log_info(
-        session,
-        "CODEX",
-        f"Knowledge applied for: {device.filesystem}"
-    )
-
+for index, device in enumerate(devices, start=1):
+    print(f"[{index}]")
     print(f"Device     : {device.path}")
-    print(f"Identity   : {device.model}")
+    print(f"Model      : {device.model}")
+    print(f"Serial     : {device.serial}")
+    print(f"Size       : {device.size}")
+    print(f"Transport  : {device.transport}")
     print(f"Filesystem : {device.filesystem}")
     print(f"Role       : {device.role}")
-
-    print()
-    print("CODEX")
-
-    for filesystem in device.filesystem.split(","):
-        key = filesystem.strip().lower()
-        knowledge = codex.lookup("filesystem", key)
-
-        if knowledge:
-            print(f"Filesystem : {key}")
-
-            if "warning" in knowledge:
-                print(f"Warning    : {knowledge['warning']}")
-
-            if "risk" in knowledge:
-                print(f"Risk       : {knowledge['risk']}")
-
-            if "recommended_action" in knowledge:
-                print(f"Action     : {knowledge['recommended_action']}")
-
-            print()
-
-    print("AEGIS")
-    print(f"Decision   : {assessment.decision.status}")
-    print(f"Reason     : {assessment.decision.reason}")
-
-    print()
-    print("ORACLE")
-    print(f"Goal       : {strategy.goal}")
-    print(f"Priority   : {strategy.priority}")
-
-    print()
-    print("Strategy")
-
-    for step in strategy.steps:
-        print(f"- {step}")
-
-    print()
-    print_summary(assessment, strategy)
-
     print("-" * 40)
+
+print()
+
+print(f"Select device [1-{len(devices)}]")
+selection = int(input("> "))
+
+codex = Codex()
+
+
+device = devices[selection - 1]
+
+assessment = evaluate(device)
+
+if assessment.decision.status == "STOP":
+    log_warning(
+        session,
+        "AEGIS",
+        f"Decision: STOP ({assessment.decision.reason})"
+    )
+else:
+    log_info(
+        session,
+        "AEGIS",
+        f"Decision: {assessment.decision.status}"
+    )
+
+strategy = create_strategy(assessment)
+
+log_info(
+    session,
+    "ORACLE",
+    f"Strategy generated: {strategy.status} / {strategy.priority}"
+)
+
+log_info(
+    session,
+    "CODEX",
+    f"Knowledge applied for: {device.filesystem}"
+)
+
+print(f"Device     : {device.path}")
+print(f"Identity   : {device.model}")
+print(f"Filesystem : {device.filesystem}")
+print(f"Role       : {device.role}")
+
+print()
+print("CODEX")
+
+for filesystem in device.filesystem.split(","):
+    key = filesystem.strip().lower()
+    knowledge = codex.lookup("filesystem", key)
+
+    if knowledge:
+        print(f"Filesystem : {key}")
+
+        if "warning" in knowledge:
+            print(f"Warning    : {knowledge['warning']}")
+
+        if "risk" in knowledge:
+            print(f"Risk       : {knowledge['risk']}")
+
+        if "recommended_action" in knowledge:
+            print(f"Action     : {knowledge['recommended_action']}")
+
+        print()
+
+print("AEGIS")
+print(f"Decision   : {assessment.decision.status}")
+print(f"Reason     : {assessment.decision.reason}")
+
+print()
+print("ORACLE")
+print(f"Goal       : {strategy.goal}")
+print(f"Priority   : {strategy.priority}")
+
+print()
+print("Strategy")
+
+for step in strategy.steps:
+    print(f"- {step}")
+
+print()
+print_summary(assessment, strategy)
+
+print("-" * 40)
 
 log_info(
     session,
