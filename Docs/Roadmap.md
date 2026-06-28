@@ -12,7 +12,7 @@ v0.1 Foundation ✅
 - [x] Verified on MacOS
 
 v0.2 Usable CLI
-- [ ] ARGUS selects target device
+- [ ] Technician selects target device discovered by ARGUS
 - [ ] CLI command: sentinel scan
 - [ ] CLI command: sentinel assess
 - [ ] CLI command: sentinel plan

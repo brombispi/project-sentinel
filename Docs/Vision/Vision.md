@@ -13,6 +13,9 @@ DRS-1 (DigiRettung Recovery Station) is the first reference implementation of Pr
 
 Philosophy
 
+Avoid ambiguous terminology, hidden assumptions and unexplained actions.
+Every important decision, recommendation and report should be clear enough that two recovery engineers reach the same conclusion after reading it.
+
 Every storage device deserves one careful chance.
 
 DRS-1 always aims to:
