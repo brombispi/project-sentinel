@@ -12,7 +12,7 @@ from modules.oracle import create_strategy
 from modules.summary import print_summary
 from modules.archive import create_session
 from core.codex import Codex
-from modules.echo import log_info
+from modules.echo import log_info, log_warning
 
 print("==========================================")
 print("PROJECT SENTINEL")
@@ -52,6 +52,20 @@ print()
 for device in devices:
 
     assessment = evaluate(device)
+
+    if assessment.decision.status == "STOP":
+        log_warning(
+            session,
+            "AEGIS",
+            f"Decision: STOP ({assessment.decision.reason})"
+        )
+    else:
+        log_info(
+            session,
+            "AEGIS",
+            f"Decision: {assessment.decision.status}"
+        )
+
     strategy = create_strategy(assessment)
 
     print(f"Device     : {device.path}")
@@ -83,21 +97,24 @@ for device in devices:
     print("AEGIS")
     print(f"Decision   : {assessment.decision.status}")
     print(f"Reason     : {assessment.decision.reason}")
+
     print()
     print("ORACLE")
     print(f"Goal       : {strategy.goal}")
     print(f"Priority   : {strategy.priority}")
+
     print()
     print("Strategy")
 
     for step in strategy.steps:
         print(f"- {step}")
+
     print()
     print_summary(assessment, strategy)
 
     print("-" * 40)
 
-    log_info(
+log_info(
     session,
     "SENTINEL",
     "Assessment completed."
