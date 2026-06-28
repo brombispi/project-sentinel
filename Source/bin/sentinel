@@ -104,7 +104,8 @@ log_info(
 )
 
 print(f"Device     : {device.path}")
-print(f"Identity   : {device.model}")
+print(f"Model      : {device.model}")
+print(f"Serial     : {device.serial}")
 print(f"Filesystem : {device.filesystem}")
 print(f"Role       : {device.role}")
 
