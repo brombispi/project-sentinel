@@ -1,4 +1,4 @@
-2026-06-27
+2026-06-28
 
 Objectives completed
 
@@ -27,7 +27,15 @@ Important decisions
 • Every important action should be explainable.
 • ECHO is the only module responsible for writing audit logs.
 • Audit entries identify both module and severity.
+• Sentinel logs assessment start and completion.
+• ARGUS logs what it observed, not just that it ran.
 
 Next objective
 
-Begin ECHO audit logging.
+• Integrate ECHO into CODEX, AEGIS and ORACLE.
+
+Lessons learned
+
+• Small, verified changes reduce refactoring mistakes.
+• Runtime state must never be deployed as source code.
+• Infrastructure should be completed before building features on top of it.
