@@ -7,28 +7,31 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from modules.argus import detect_devices
-from modules.manifest import write_case_manifest
 from modules.aegis import evaluate
 from modules.oracle import create_strategy
 from modules.summary import print_summary
 from modules.archive import create_session
 from modules.echo import log_info, log_warning
-from core.codex import Codex
-from core.status import RecoveryStatus
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
 from modules.janus import evaluate_destination
-from modules.device_selection import print_device_selection_list, select_source_device
+from modules.device_selection import (
+    print_device_selection_list,
+    select_source_device,
+)
+from modules.recovery_tools import list_recovery_tools
+
+from core.codex import Codex
+from core.status import RecoveryStatus
 
 
 print("==========================================")
 print("PROJECT SENTINEL")
-print("Assessment Engine")
 print("==========================================")
 print()
 
-session = None
 case_name = input("Case name: ").strip()
+
 session = create_session()
 intake = collect_case_intake()
 
@@ -36,11 +39,13 @@ session.case_name = case_name
 
 if session.case_name == "":
     session.case_name = session.session_id
+
 log_info(
     session,
     "SENTINEL",
     f"Case name set: {session.case_name}"
 )
+
 log_info(
     session,
     "INTAKE",
@@ -48,7 +53,6 @@ log_info(
 )
 
 session.status = RecoveryStatus.ASSESSING
-
 
 log_info(
     session,
@@ -72,10 +76,8 @@ else:
         f"Detected {device_count} storage devices."
     )
 
-print(f"Recovery Session : {session.session_id}")
-print(f"Case Name        : {session.case_name}")
-print(f"Session Status   : {session.status}")
-print(f"Created At       : {session.created_at}")
+print(f"Recovery Case : {session.session_id}")
+print(f"Case Name     : {session.case_name}")
 print()
 
 print_device_selection_list(
@@ -91,18 +93,16 @@ session.assessment = assessment
 
 destination_assessment = evaluate_destination(session.source_device)
 
-session.status = RecoveryStatus.ASSESSING
-
 save_case(session, intake=intake)
 
 if assessment.decision.status == "STOP":
     update_status(
-    session,
-    RecoveryStatus.ON_HOLD,
-    session.source_device,
-    assessment,
-    intake=intake
-)
+        session,
+        RecoveryStatus.ON_HOLD,
+        session.source_device,
+        assessment,
+        intake=intake
+    )
 
     log_warning(
         session,
@@ -135,7 +135,6 @@ print(f"Model      : {source_device.model}")
 print(f"Serial     : {source_device.serial}")
 print(f"Filesystem : {source_device.filesystem}")
 print(f"Role       : {source_device.role}")
-
 print()
 
 codex = Codex()
@@ -163,6 +162,7 @@ for filesystem in source_device.filesystem.split(","):
 print("AEGIS")
 print(f"Decision   : {assessment.decision.status}")
 print(f"Reason     : {assessment.decision.reason}")
+
 print()
 print("JANUS")
 print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
@@ -179,6 +179,10 @@ print("Strategy")
 
 for step in strategy.steps:
     print(f"- {step}")
+
+if assessment.decision.status != "STOP":
+    print("\nRECOVERY")
+    list_recovery_tools()
 
 print()
 print_summary(assessment, strategy)
