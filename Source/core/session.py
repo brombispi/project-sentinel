@@ -19,3 +19,4 @@ class RecoverySession:
 
     source_device: object | None = None
     destination_device: object | None = None
+    assessment: object | None = None

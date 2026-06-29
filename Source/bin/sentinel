@@ -86,13 +86,14 @@ print_device_selection_list(
 source_device = select_source_device(devices)
 session.source_device = source_device
 
-destination_assessment = evaluate_destination(session.source_device)
-
 assessment = evaluate(session.source_device)
+session.assessment = assessment
+
+destination_assessment = evaluate_destination(session.source_device)
 
 session.status = RecoveryStatus.ASSESSING
 
-save_case(session, session.source_device, assessment, intake=intake)
+save_case(session, intake=intake)
 
 if assessment.decision.status == "STOP":
     update_status(
@@ -136,6 +137,9 @@ print(f"Filesystem : {source_device.filesystem}")
 print(f"Role       : {source_device.role}")
 
 print()
+
+codex = Codex()
+
 print("CODEX")
 
 for filesystem in source_device.filesystem.split(","):
