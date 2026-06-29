@@ -17,6 +17,8 @@ from core.codex import Codex
 from core.status import RecoveryStatus
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
+from modules.janus import evaluate_destination
+from modules.device_selection import print_device_selection_list, select_source_device
 
 
 print("==========================================")
@@ -76,40 +78,26 @@ print(f"Session Status   : {session.status}")
 print(f"Created At       : {session.created_at}")
 print()
 
-print("Detected Storage Devices")
-print("=" * 40)
+print_device_selection_list(
+    "SOURCE DEVICE SELECTION",
+    devices
+)
 
-for index, device in enumerate(devices, start=1):
-    print(f"[{index}]")
-    print(f"Device     : {device.path}")
-    print(f"Model      : {device.model}")
-    print(f"Serial     : {device.serial}")
-    print(f"Size       : {device.size}")
-    print(f"Transport  : {device.transport}")
-    print(f"Filesystem : {device.filesystem}")
-    print(f"Role       : {device.role}")
-    print("-" * 40)
+source_device = select_source_device(devices)
 
-print()
+destination_assessment = evaluate_destination(source_device)
 
-print(f"Select device [1-{len(devices)}]")
-selection = int(input("> "))
-
-codex = Codex()
-
-device = devices[selection - 1]
-
-assessment = evaluate(device)
+assessment = evaluate(source_device)
 
 session.status = RecoveryStatus.ASSESSING
 
-save_case(session, device, assessment, intake=intake)
+save_case(session, source_device, assessment, intake=intake)
 
 if assessment.decision.status == "STOP":
     update_status(
     session,
     RecoveryStatus.ON_HOLD,
-    device,
+    source_device,
     assessment,
     intake=intake
 )
@@ -137,19 +125,19 @@ log_info(
 log_info(
     session,
     "CODEX",
-    f"Knowledge applied for: {device.filesystem}"
+    f"Knowledge applied for: {source_device.filesystem}"
 )
 
-print(f"Device     : {device.path}")
-print(f"Model      : {device.model}")
-print(f"Serial     : {device.serial}")
-print(f"Filesystem : {device.filesystem}")
-print(f"Role       : {device.role}")
+print(f"Device     : {source_device.path}")
+print(f"Model      : {source_device.model}")
+print(f"Serial     : {source_device.serial}")
+print(f"Filesystem : {source_device.filesystem}")
+print(f"Role       : {source_device.role}")
 
 print()
 print("CODEX")
 
-for filesystem in device.filesystem.split(","):
+for filesystem in source_device.filesystem.split(","):
     key = filesystem.strip().lower()
     knowledge = codex.lookup("filesystem", key)
 
@@ -170,6 +158,11 @@ for filesystem in device.filesystem.split(","):
 print("AEGIS")
 print(f"Decision   : {assessment.decision.status}")
 print(f"Reason     : {assessment.decision.reason}")
+print()
+print("JANUS")
+print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
+print(f"Reason    : {destination_assessment.reason}")
+print(f"Risk      : {destination_assessment.risk}")
 
 print()
 print("ORACLE")
