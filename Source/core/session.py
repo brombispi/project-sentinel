@@ -16,3 +16,6 @@ class RecoverySession:
     status: str
     recovery_path: str
     case_name: str = ""
+
+    source_device: object | None = None
+    destination_device: object | None = None

@@ -84,20 +84,21 @@ print_device_selection_list(
 )
 
 source_device = select_source_device(devices)
+session.source_device = source_device
 
-destination_assessment = evaluate_destination(source_device)
+destination_assessment = evaluate_destination(session.source_device)
 
-assessment = evaluate(source_device)
+assessment = evaluate(session.source_device)
 
 session.status = RecoveryStatus.ASSESSING
 
-save_case(session, source_device, assessment, intake=intake)
+save_case(session, session.source_device, assessment, intake=intake)
 
 if assessment.decision.status == "STOP":
     update_status(
     session,
     RecoveryStatus.ON_HOLD,
-    source_device,
+    session.source_device,
     assessment,
     intake=intake
 )
