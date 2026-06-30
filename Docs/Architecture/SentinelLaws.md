@@ -88,8 +88,20 @@ Engineering Philosophy
 
 Project Sentinel is designed around one fundamental objective:
 
-Recover data while introducing the least possible additional risk to the customer’s original media.
+Recover data while introducing the least possible risk to the customer’s original media.
 
 Every feature, workflow and future module should support this objective.
 
 If a proposed feature cannot improve safety, reliability, transparency or operator confidence, it should be reconsidered before implementation.
+
+⸻
+
+SL-007
+
+Preserve Workflow
+
+Every workflow shall follow a logical sequence that supports safe recovery practices.
+
+Project Sentinel shall never encourage or permit actions that contradict a previous safety assessment.
+
+Every subsequent recommendation shall remain consistent with all previous observations and decisions.

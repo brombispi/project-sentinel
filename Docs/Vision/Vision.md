@@ -33,10 +33,22 @@ Project Sentinel is not intended to be just another recovery application.
 
 It is envisioned as a modular recovery platform that combines reliable hardware, open-source software and structured engineering knowledge to make data recovery safer, more consistent and more professional.
 
-The platform aims to assist technicians in making safer, evidence-based decisions by combining observed device data with curated recovery knowledge.
+The platform assists recovery technicians in making safer, evidence-based decisions by combining observed device data, structured engineering workflow and curated recovery knowledge.
 
 DRS-1 is the first reference implementation of that vision.
 
 Every new version of Project Sentinel should improve reliability, simplicity and customer trust.
 
 Recover data. Preserve memories. Protect the original.
+
+Fundamental Principles
+
+* Sentinel assists recovery engineers. It does not replace professional judgement.
+
+* Every recovery action remains under the technician’s control.
+
+* Recommendations are based on observed evidence, engineering workflow and curated recovery knowledge.
+
+* Sentinel prioritises preserving the customer’s original data over speed or convenience.
+
+* Automation exists to reduce risk and improve consistency, never to remove accountability.

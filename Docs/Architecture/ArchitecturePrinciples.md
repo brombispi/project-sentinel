@@ -97,3 +97,14 @@ Backups are archives.
 Conversations are guidance.
 
 Only the repository represents the current implementation of Project Sentinel.
+
+
+AP-006
+
+Workflow Before Features
+
+New functionality shall integrate into the existing recovery workflow rather than bypass it.
+
+A feature is complete only when it fits naturally into the operator’s workflow.
+
+Workflow consistency is preferred over isolated functionality.
