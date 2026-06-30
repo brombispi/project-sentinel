@@ -40,7 +40,16 @@ Important decisions
 
 Next objective
 
-• Implement technician device selection in ARGUS.
+•  Create JANUS.
+•  Select a destination drive.
+•  Validate it.
+•  Refuse unsafe destinations.
+•  Persist the decision in case.json.Implement technician device selection in ARGUS.
+•  Create JANUS.
+•  Select a destination drive.
+•  Validate it.
+•  Refuse unsafe destinations.
+•  Persist the decision in case.json.
 
 Lessons learned
 
