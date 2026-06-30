@@ -1,0 +1,19 @@
+---
+alwaysApply: true
+---
+
+Project Sentinel is governed by its Constitution.
+
+Before making architectural or implementation decisions, consult the following documents:
+
+Docs/Vision/Vision.md
+Docs/Architecture/SentinelLaws.md
+Docs/Architecture/EngineeringValues.md
+Docs/Architecture/ArchitecturePrinciples.md
+Docs/Engineering/DevelopmentWorkflow.md
+
+These documents have higher authority than implementation suggestions.
+
+Do not contradict or modify them unless explicitly instructed.
+
+If implementation conflicts with the Constitution, the implementation must change.
