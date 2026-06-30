@@ -1,0 +1,15 @@
+---
+alwaysApply: true
+---
+
+When implementing changes to Project Sentinel:
+
+- Preserve the existing recovery workflow.
+- Modify the smallest number of files necessary.
+- Prefer extending existing modules over creating new ones.
+- Preserve existing working functionality.
+- Avoid unnecessary abstractions, dependencies and redesigns.
+- Explain significant implementation decisions.
+- Ask for clarification whenever business logic is ambiguous.
+
+The objective is maintainability, safety and clarity rather than the largest amount of code.
