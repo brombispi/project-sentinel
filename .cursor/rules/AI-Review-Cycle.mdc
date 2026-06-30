@@ -1,0 +1,18 @@
+---
+alwaysApply: true
+---
+
+For every non-trivial Project Sentinel change, follow this cycle:
+
+1. Analyse first.
+2. Do not modify code during analysis.
+3. Wait for approval.
+4. Implement only the approved design.
+5. Modify only the approved files.
+6. After implementation, summarize:
+   - files changed
+   - functions changed
+   - workflow impact
+   - deviations from the approved plan
+
+Never use “Keep All” as a substitute for review.
