@@ -36,5 +36,16 @@ def write_case_manifest(session, device, assessment, intake=None):
 "intake": intake["intake"] if intake else {}
     }
 
+    if session.destination_device:
+        manifest["destination"] = {
+            "path": session.destination_device.path,
+            "model": session.destination_device.model,
+            "serial": session.destination_device.serial,
+            "size": session.destination_device.size,
+            "transport": session.destination_device.transport,
+            "filesystem": session.destination_device.filesystem,
+            "role": session.destination_device.role
+        }
+
     with open(manifest_path, "w") as file:
         json.dump(manifest, file, indent=4)

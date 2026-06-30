@@ -18,6 +18,7 @@ from modules.janus import evaluate_destination
 from modules.device_selection import (
     print_device_selection_list,
     select_source_device,
+    select_destination_device,
 )
 from modules.recovery_tools import list_recovery_tools
 
@@ -91,31 +92,6 @@ session.source_device = source_device
 assessment = evaluate(session.source_device)
 session.assessment = assessment
 
-destination_assessment = evaluate_destination(session.source_device)
-
-save_case(session, intake=intake)
-
-if assessment.decision.status == "STOP":
-    update_status(
-        session,
-        RecoveryStatus.ON_HOLD,
-        session.source_device,
-        assessment,
-        intake=intake
-    )
-
-    log_warning(
-        session,
-        "AEGIS",
-        f"Decision: STOP ({assessment.decision.reason})"
-    )
-else:
-    log_info(
-        session,
-        "AEGIS",
-        f"Decision: {assessment.decision.status}"
-    )
-
 strategy = create_strategy(assessment)
 
 log_info(
@@ -164,12 +140,6 @@ print(f"Decision   : {assessment.decision.status}")
 print(f"Reason     : {assessment.decision.reason}")
 
 print()
-print("JANUS")
-print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
-print(f"Reason    : {destination_assessment.reason}")
-print(f"Risk      : {destination_assessment.risk}")
-
-print()
 print("ORACLE")
 print(f"Goal       : {strategy.goal}")
 print(f"Priority   : {strategy.priority}")
@@ -180,9 +150,53 @@ print("Strategy")
 for step in strategy.steps:
     print(f"- {step}")
 
-if assessment.decision.status != "STOP":
-    print("\nRECOVERY")
-    list_recovery_tools()
+if assessment.decision.status == "STOP":
+    update_status(
+        session,
+        RecoveryStatus.ON_HOLD,
+        session.source_device,
+        assessment,
+        intake=intake
+    )
+
+    log_warning(
+        session,
+        "AEGIS",
+        f"Decision: STOP ({assessment.decision.reason})"
+    )
+else:
+    log_info(
+        session,
+        "AEGIS",
+        f"Decision: {assessment.decision.status}"
+    )
+
+    destination_candidates = [
+        device for device in devices
+        if device.path != session.source_device.path
+    ]
+
+    print_device_selection_list(
+        "DESTINATION DEVICE SELECTION",
+        destination_candidates
+    )
+
+    session.destination_device = select_destination_device(
+        destination_candidates
+    )
+    destination_assessment = evaluate_destination(session.destination_device)
+
+    print()
+    print("JANUS")
+    print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
+    print(f"Reason    : {destination_assessment.reason}")
+    print(f"Risk      : {destination_assessment.risk}")
+
+    save_case(session, intake=intake)
+
+    if destination_assessment.approved:
+        print("\nRECOVERY")
+        list_recovery_tools()
 
 print()
 print_summary(assessment, strategy)
