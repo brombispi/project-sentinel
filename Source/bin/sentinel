@@ -10,7 +10,7 @@ from modules.argus import detect_devices
 from modules.aegis import evaluate
 from modules.oracle import create_strategy
 from modules.summary import print_summary
-from modules.archive import create_session
+from modules.archive import create_session, execute_forensic_image
 from modules.echo import log_info, log_warning
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
@@ -20,8 +20,6 @@ from modules.device_selection import (
     select_source_device,
     select_destination_device,
 )
-from modules.recovery_tools import list_recovery_tools
-
 from core.codex import Codex
 from core.status import RecoveryStatus
 
@@ -196,7 +194,24 @@ else:
 
     if destination_assessment.approved:
         print("\nRECOVERY")
-        list_recovery_tools()
+        print("Operation  : Create forensic image")
+        print(f"Source     : {session.source_device.path}")
+        print(f"Output     : {session.recovery_path}/images/source.img")
+
+        confirm = input("Proceed with forensic imaging? [y/N]: ").strip().lower()
+
+        if confirm == "y":
+            result = execute_forensic_image(session)
+
+            print()
+            print("ARCHIVE")
+            print(f"Status     : {result['status']}")
+            print(f"Result     : {result['message']}")
+
+            if result["artifacts"]:
+                print("Artifacts  :")
+                for artifact in result["artifacts"]:
+                    print(f"- {artifact}")
 
 print()
 print_summary(assessment, strategy)
