@@ -58,6 +58,63 @@ def get_filesystem(device_name):
     return ", ".join(filesystems)
 
 
+def get_mount_point(device_name):
+    result = subprocess.run(
+        ["lsblk", "-nr", "-o", "NAME,PKNAME,PATH", f"/dev/{device_name}"],
+        capture_output=True,
+        text=True
+    )
+
+    children = {}
+    paths = {}
+
+    for line in result.stdout.strip().splitlines():
+        parts = line.split()
+
+        if len(parts) < 3:
+            continue
+
+        name = parts[0]
+        parent_name = parts[1]
+        path = parts[2]
+
+        paths[name] = path
+
+        if parent_name not in children:
+            children[parent_name] = []
+        children[parent_name].append(name)
+
+    for child in children.get(device_name, []):
+        stack = [child]
+
+        while stack:
+            name = stack.pop()
+            source = paths.get(name)
+
+            if source:
+                mount_result = subprocess.run(
+                    ["findmnt", "-rn", "-S", source, "-o", "TARGET,OPTIONS"],
+                    capture_output=True,
+                    text=True
+                )
+
+                mount_line = mount_result.stdout.strip()
+
+                if mount_line:
+                    mount_parts = mount_line.split(None, 1)
+
+                    if len(mount_parts) >= 2:
+                        target, options = mount_parts[0], mount_parts[1]
+
+                        if "rw" in options.split(","):
+                            return target
+
+            for descendant in reversed(children.get(name, [])):
+                stack.append(descendant)
+
+    return None
+
+
 def get_access_mode(device_name):
     result = subprocess.run(
         ["lsblk", "-nr", "-o", "NAME,PKNAME", f"/dev/{device_name}"],
@@ -156,6 +213,7 @@ def detect_devices():
             role = "EXTERNAL DEVICE"
             protected = False
 
+        mount_point = get_mount_point(name)
         mounted = is_mounted(name)
         filesystem = get_filesystem(name)
         access_mode = get_access_mode(name)
@@ -171,7 +229,8 @@ def detect_devices():
             protected=protected,
             mounted=mounted,
             filesystem=filesystem,
-            access_mode=access_mode
+            access_mode=access_mode,
+            mount_point=mount_point,
         )
 
         device.knowledge = knowledge_items

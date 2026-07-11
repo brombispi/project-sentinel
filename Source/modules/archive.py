@@ -52,6 +52,51 @@ def create_session():
     return session
 
 
+def relocate_recovery_case(session, mount_point):
+    """
+    Move the recovery case workspace to the approved destination filesystem.
+    """
+
+    result = {
+        "success": False,
+        "status": "failed",
+        "message": "",
+    }
+
+    local_path = Path(session.recovery_path)
+    dest_path = Path(mount_point) / "Recoveries" / session.session_id
+
+    if not local_path.is_dir():
+        result["message"] = "Local recovery case folder not found."
+        log_error(session, "ARCHIVE", result["message"])
+        return result
+
+    if not Path(mount_point).is_dir():
+        result["message"] = f"Destination mount point not found: {mount_point}"
+        log_error(session, "ARCHIVE", result["message"])
+        return result
+
+    if dest_path.exists():
+        result["message"] = f"Destination case folder already exists: {dest_path}"
+        log_error(session, "ARCHIVE", result["message"])
+        return result
+
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(local_path), str(dest_path))
+    except OSError as error:
+        result["message"] = f"Recovery case relocation failed: {error}"
+        log_error(session, "ARCHIVE", result["message"])
+        return result
+
+    session.recovery_path = str(dest_path)
+    result["success"] = True
+    result["status"] = "completed"
+    result["message"] = f"Recovery case relocated to {dest_path}"
+    log_info(session, "ARCHIVE", result["message"])
+    return result
+
+
 def execute_forensic_image(session):
     """
     Create a forensic image of the source device using ddrescue.
@@ -63,7 +108,6 @@ def execute_forensic_image(session):
     images_dir = Path(session.recovery_path) / "images"
     image_path = images_dir / "source.img"
     map_path = images_dir / "source.map"
-    log_path = images_dir / "ddrescue.log"
 
     result = {
         "success": False,
@@ -92,15 +136,7 @@ def execute_forensic_image(session):
             str(image_path),
             str(map_path),
         ],
-        capture_output=True,
-        text=True,
     )
-
-    with open(log_path, "w") as log_file:
-        if completed.stdout:
-            log_file.write(completed.stdout)
-        if completed.stderr:
-            log_file.write(completed.stderr)
 
     if completed.returncode == 0:
         result["success"] = True
@@ -108,15 +144,12 @@ def execute_forensic_image(session):
         result["artifacts"] = [
             str(image_path),
             str(map_path),
-            str(log_path),
         ]
         result["message"] = "Forensic image created successfully."
         log_info(session, "ARCHIVE", "Forensic imaging completed.")
     else:
         result["message"] = (
-            completed.stderr.strip()
-            or completed.stdout.strip()
-            or "ddrescue exited with an error."
+            f"ddrescue exited with code {completed.returncode}."
         )
         log_error(
             session,

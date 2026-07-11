@@ -10,7 +10,11 @@ from modules.argus import detect_devices
 from modules.aegis import evaluate
 from modules.oracle import create_strategy
 from modules.summary import print_summary
-from modules.archive import create_session, execute_forensic_image
+from modules.archive import (
+    create_session,
+    execute_forensic_image,
+    relocate_recovery_case,
+)
 from modules.echo import log_info, log_warning
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
@@ -190,9 +194,24 @@ else:
     print(f"Reason    : {destination_assessment.reason}")
     print(f"Risk      : {destination_assessment.risk}")
 
-    save_case(session, intake=intake)
+    case_relocated = False
 
     if destination_assessment.approved:
+        relocate_result = relocate_recovery_case(
+            session,
+            session.destination_device.mount_point,
+        )
+
+        print()
+        print("ARCHIVE")
+        print(f"Status     : {relocate_result['status']}")
+        print(f"Result     : {relocate_result['message']}")
+
+        case_relocated = relocate_result["success"]
+
+    save_case(session, intake=intake)
+
+    if destination_assessment.approved and case_relocated:
         print("\nRECOVERY")
         print("Operation  : Create forensic image")
         print(f"Source     : {session.source_device.path}")

@@ -10,7 +10,8 @@ class Device:
         protected,
         mounted,
         filesystem,
-        access_mode
+        access_mode,
+        mount_point=None,
     ):
         self.name = name
         self.path = f"/dev/{name}"
@@ -23,6 +24,7 @@ class Device:
         self.mounted = mounted
         self.filesystem = filesystem
         self.access_mode = access_mode
+        self.mount_point = mount_point
 
     def is_protected(self):
         return self.protected

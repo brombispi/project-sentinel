@@ -21,8 +21,15 @@ def evaluate_destination(device):
             risk="CRITICAL"
         )
 
+    if not device.mount_point:
+        return DestinationAssessment(
+            approved=False,
+            reason="Destination is not mounted or has no writable mount point.",
+            risk="HIGH"
+        )
+
     return DestinationAssessment(
         approved=True,
-        reason="Destination device approved.",
+        reason=f"Destination device approved at {device.mount_point}.",
         risk="LOW"
     )
