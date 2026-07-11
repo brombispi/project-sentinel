@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import json
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -180,6 +182,129 @@ def get_filesystem_knowledge(codex, filesystem_text):
             })
 
     return knowledge_items
+
+
+OVERALL_HEALTH_PATTERN = re.compile(
+    r"SMART overall-health self-assessment test result:\s*(\w+)",
+    re.IGNORECASE,
+)
+
+
+def _combine_smartctl_output(stdout, stderr):
+    parts = []
+
+    if stdout:
+        parts.append(stdout)
+
+    if stderr:
+        if parts and not parts[-1].endswith("\n"):
+            parts.append("\n")
+        parts.append(stderr)
+
+    return "".join(parts)
+
+
+def _parse_overall_health(combined_output):
+    match = OVERALL_HEALTH_PATTERN.search(combined_output)
+
+    if not match:
+        return None
+
+    value = match.group(1).upper()
+
+    if value in ("PASSED", "FAILED"):
+        return value
+
+    return None
+
+
+def _smartctl_execution_failed(returncode):
+    """
+    True when exit code bits 0-1 indicate smartctl could not run properly.
+
+    Bit 0: command-line parse failure.
+    Bit 1: device open/access failure.
+    Higher bits report SMART status without implying the command did not run.
+    """
+    return (returncode & 3) != 0
+
+
+def _smartctl_execution_warning(returncode, device_path):
+    parse_failed = bool(returncode & 1)
+    access_failed = bool(returncode & 2)
+
+    if parse_failed and access_failed:
+        return (
+            f"smartctl command-line or parse failure and device open/access "
+            f"failure for {device_path} (exit code {returncode})."
+        )
+
+    if parse_failed:
+        return (
+            f"smartctl command-line or parse failure "
+            f"(exit code {returncode})."
+        )
+
+    return (
+        f"smartctl device open/access failure for {device_path} "
+        f"(exit code {returncode})."
+    )
+
+
+def collect_smart_report(device, output_path):
+    """
+    Run smartctl against a device and save the raw report.
+
+    Returns observation facts only. Does not interpret SMART attributes.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "available": False,
+        "health": "not reported",
+        "output_path": str(output_path),
+        "warning": None,
+    }
+
+    if not shutil.which("smartctl"):
+        result["warning"] = "smartctl is not installed."
+        output_path.write_text(result["warning"] + "\n", encoding="utf-8")
+        return result
+
+    completed = subprocess.run(
+        ["smartctl", "-a", device.path],
+        capture_output=True,
+        text=True,
+    )
+
+    combined_output = _combine_smartctl_output(
+        completed.stdout,
+        completed.stderr,
+    )
+    output_path.write_text(combined_output, encoding="utf-8")
+
+    if _smartctl_execution_failed(completed.returncode):
+        result["warning"] = _smartctl_execution_warning(
+            completed.returncode,
+            device.path,
+        )
+        return result
+
+    health = _parse_overall_health(combined_output)
+
+    if health in ("PASSED", "FAILED"):
+        result["available"] = True
+        result["health"] = health
+        return result
+
+    if combined_output.strip():
+        result["available"] = True
+        result["health"] = "not reported"
+        return result
+
+    result["warning"] = "smartctl produced no output."
+    return result
 
 
 def detect_devices():

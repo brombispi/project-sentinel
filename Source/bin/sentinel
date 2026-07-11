@@ -6,16 +6,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
-from modules.argus import detect_devices
+from modules.argus import collect_smart_report, detect_devices
 from modules.aegis import evaluate
 from modules.oracle import create_strategy
-from modules.summary import print_summary
+from modules.summary import format_bytes, print_summary
 from modules.archive import (
     create_session,
     execute_forensic_image,
+    execute_photorec_recovery,
     relocate_recovery_case,
+    verify_forensic_image,
 )
-from modules.echo import log_info, log_warning
+from modules.echo import log_info, log_operator, log_warning
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
 from modules.janus import evaluate_destination
@@ -55,8 +57,6 @@ log_info(
     "Recovery case intake completed."
 )
 
-session.status = RecoveryStatus.ASSESSING
-
 log_info(
     session,
     "SENTINEL",
@@ -93,6 +93,14 @@ session.source_device = source_device
 
 assessment = evaluate(session.source_device)
 session.assessment = assessment
+
+update_status(
+    session,
+    RecoveryStatus.ASSESSING,
+    session.source_device,
+    assessment,
+    intake=intake,
+)
 
 strategy = create_strategy(assessment)
 
@@ -152,6 +160,13 @@ print("Strategy")
 for step in strategy.steps:
     print(f"- {step}")
 
+smart_result = None
+imaging_result = None
+integrity_result = None
+recovery_result = None
+imaging_declined = False
+recovery_declined = False
+
 if assessment.decision.status == "STOP":
     update_status(
         session,
@@ -172,6 +187,36 @@ else:
         "AEGIS",
         f"Decision: {assessment.decision.status}"
     )
+
+    smart_output_path = (
+        Path(session.recovery_path) / "evidence" / "source.smart.txt"
+    )
+    smart_result = collect_smart_report(
+        session.source_device,
+        smart_output_path,
+    )
+
+    print()
+    print("SMART")
+    print(f"Available  : {'YES' if smart_result['available'] else 'NO'}")
+    print(f"Health     : {smart_result['health']}")
+    print(f"Saved to   : {smart_result['output_path']}")
+
+    if smart_result["warning"]:
+        print(f"Warning    : {smart_result['warning']}")
+
+    if smart_result["available"]:
+        log_info(
+            session,
+            "ARGUS",
+            f"SMART report collected: health {smart_result['health']}",
+        )
+    else:
+        log_warning(
+            session,
+            "ARGUS",
+            smart_result["warning"] or "SMART report unavailable.",
+        )
 
     destination_candidates = [
         device for device in devices
@@ -209,7 +254,16 @@ else:
 
         case_relocated = relocate_result["success"]
 
-    save_case(session, intake=intake)
+    if destination_assessment.approved and case_relocated:
+        update_status(
+            session,
+            RecoveryStatus.READY_FOR_IMAGING,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+    else:
+        save_case(session, intake=intake)
 
     if destination_assessment.approved and case_relocated:
         print("\nRECOVERY")
@@ -220,20 +274,137 @@ else:
         confirm = input("Proceed with forensic imaging? [y/N]: ").strip().lower()
 
         if confirm == "y":
-            result = execute_forensic_image(session)
+            update_status(
+                session,
+                RecoveryStatus.IMAGING,
+                session.source_device,
+                assessment,
+                intake=intake,
+            )
+
+            imaging_result = execute_forensic_image(session)
 
             print()
             print("ARCHIVE")
-            print(f"Status     : {result['status']}")
-            print(f"Result     : {result['message']}")
+            print(f"Status     : {imaging_result['status']}")
+            print(f"Result     : {imaging_result['message']}")
 
-            if result["artifacts"]:
+            if imaging_result["artifacts"]:
                 print("Artifacts  :")
-                for artifact in result["artifacts"]:
+                for artifact in imaging_result["artifacts"]:
                     print(f"- {artifact}")
 
+            if imaging_result["success"]:
+                integrity_result = verify_forensic_image(session)
+
+                print()
+                print("INTEGRITY")
+                print(f"Image      : {integrity_result['image_filename']}")
+                print(f"Algorithm  : {integrity_result['algorithm']}")
+
+                if integrity_result["success"]:
+                    print("Result     : Hash recorded")
+                    print(f"SHA-256    : {integrity_result['digest']}")
+                    print(f"Saved to   : {integrity_result['evidence_path']}")
+                else:
+                    print("Result     : Failed")
+                    print(f"Error      : {integrity_result['message']}")
+
+                update_status(
+                    session,
+                    RecoveryStatus.READY_FOR_RECOVERY,
+                    session.source_device,
+                    assessment,
+                    intake=intake,
+                )
+
+                if integrity_result["success"]:
+                    print("\nRECOVERY")
+                    print("Operation  : Recover files with PhotoRec")
+                    print(
+                        f"Source image     : "
+                        f"{session.recovery_path}/images/source.img"
+                    )
+                    print(
+                        f"Recovery output  : "
+                        f"{session.recovery_path}/recovered/"
+                    )
+
+                    recovery_confirm = input(
+                        "Proceed with PhotoRec recovery? [y/N]: "
+                    ).strip().lower()
+
+                if integrity_result["success"] and recovery_confirm == "y":
+                    update_status(
+                        session,
+                        RecoveryStatus.RECOVERING,
+                        session.source_device,
+                        assessment,
+                        intake=intake,
+                    )
+
+                    recovery_result = execute_photorec_recovery(session)
+
+                    update_status(
+                        session,
+                        RecoveryStatus.READY_FOR_RECOVERY,
+                        session.source_device,
+                        assessment,
+                        intake=intake,
+                    )
+
+                    photorec_session = (
+                        "Ended normally"
+                        if recovery_result["success"]
+                        else "Failed"
+                    )
+
+                    print()
+                    print("RECOVERY RESULT")
+                    print(f"PhotoRec session      : {photorec_session}")
+                    print(
+                        "Recovered directories : "
+                        f"{recovery_result['recovered_directory_count']}"
+                    )
+                    print(
+                        "Recovered files       : "
+                        f"{recovery_result['recovered_file_count']}"
+                    )
+                    print(
+                        "Recovered size        : "
+                        f"{format_bytes(recovery_result['recovered_total_bytes'])}"
+                    )
+                    print(f"Case status           : {session.status}")
+                elif integrity_result["success"]:
+                    recovery_declined = True
+                    log_operator(
+                        session,
+                        "SENTINEL",
+                        "PhotoRec recovery declined.",
+                    )
+            else:
+                update_status(
+                    session,
+                    RecoveryStatus.READY_FOR_IMAGING,
+                    session.source_device,
+                    assessment,
+                    intake=intake,
+                )
+        else:
+            imaging_declined = True
+
 print()
-print_summary(assessment, strategy)
+print_summary(
+    assessment,
+    strategy,
+    session,
+    smart_result=smart_result,
+    imaging_result=imaging_result,
+    integrity_result=integrity_result,
+    recovery_result=recovery_result,
+    imaging_declined=imaging_declined,
+    recovery_declined=recovery_declined,
+)
 
 print("-" * 40)
 
