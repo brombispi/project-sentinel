@@ -12,7 +12,7 @@ v0.1 Foundation ✅
 - [x] Verified on MacOS
 
 v0.2 Usable CLI
-- [ ] Technician selects target device discovered by ARGUS
+- [x] Technician selects target device discovered by ARGUS
 - [ ] CLI command: sentinel scan
 - [ ] CLI command: sentinel assess
 - [ ] CLI command: sentinel plan
@@ -31,14 +31,22 @@ This is where Sentinel becomes genuinely useful before it images anything.
 v0.3 Imaging
 - [x] Persistent recovery session numbers
 - [x] Recovery workplace creation
-- [ ] ddrescue integration
-- [ ] Image destination validation
-- [ ] Never write to source device
+- [x] ddrescue integration
+- [x] Image destination validation
+- [x] Never write to source device
 - [ ] Basic imaging report
 - [x] ARCHIVE module
 
+v0.35 Evidence & Recovery
+- [x] Recovery case relocation
+- [x] SHA-256 fingerprinting
+- [x] PhotoRec integration
+- [x] Recovery statistics
+- [x] Recovery state machine
+- [x] Persistent case state
+
 v0.4 Recovery Session
-- [ ] Customer/device metadata
+- [x] Customer/device metadata
 - [x] Preserve runtime state during deployment
 - [x] ECHO audit log
 - [ ] Integrate ECHO with all Sentinel modules

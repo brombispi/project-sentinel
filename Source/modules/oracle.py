@@ -33,3 +33,18 @@ def create_strategy(assessment: Assessment):
         ],
         reason=assessment.decision.reason
     )
+
+
+def recommend_recovery_method():
+    """
+    Recommend a recovery operation after integrity verification.
+
+    ORACLE never performs recovery.
+    It only produces a recommendation.
+    """
+
+    return {
+        "recommended_operation": "photorec",
+        "confidence": "LOW",
+        "reason": "PhotoRec is currently the only integrated recovery method.",
+    }

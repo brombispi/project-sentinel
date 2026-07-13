@@ -72,24 +72,37 @@ Every recovery case progresses through a defined lifecycle.
    - The destination is selected.
    - Safety checks are performed.
    - Evidence is collected when required.
+   - The recovery case workspace is relocated to approved Recovery Storage.
 
-4. Recovery
-   - Imaging or logical recovery is performed.
+4. Preservation
+   - Forensic imaging is performed.
+   - The original source media is protected from further modification.
+   - Imaging progress and artifacts are documented.
+   - Imaging safety rules: `ImagingSafety.md`.
+
+5. Integrity
+   - SHA-256 fingerprints of forensic images are recorded as evidence.
+   - Fingerprints support later verification that an image file has not changed.
+   - Hashing does not prove that the image matches the original source device.
+   - Fingerprint retry and canonical acquisition completion: `ImagingSafety.md`.
+
+6. Recovery
+   - Approved image-based recovery operations are performed.
    - Progress is continuously documented.
 
-5. Verification
+7. Verification
    - The recovered data is reviewed.
-   - Integrity and completeness are evaluated.
+   - Completeness and expected outputs are evaluated.
 
-6. Delivery
+8. Delivery
    - The recovery report is generated.
    - The recovered data is prepared for delivery.
 
-7. Archival
+9. Archival
    - The recovery case is finalized.
    - All documentation, evidence, reports and logs remain permanently associated with the case.
 
-   ---
+---
 
 ## Core Entities
 
@@ -197,6 +210,12 @@ Provides contextual technical knowledge and recovery guidance.
 
 Creates and maintains the permanent recovery case structure.
 
+- Creates and maintains recovery case structure.
+- Relocates cases to approved Recovery Storage.
+- Executes forensic imaging.
+- Records image integrity fingerprints.
+- Executes approved image-based recovery operations.
+
 ---
 
 ### ECHO
@@ -248,6 +267,23 @@ It answers:
 - What safety decisions were made?
 
 The audit log is append-only.
+
+---
+
+### Evidence
+
+Evidence consists of every artifact collected and stored with the Recovery Case.
+
+Examples include:
+
+- SMART reports
+- Forensic images
+- ddrescue map files
+- SHA-256 fingerprint records
+- Recovery outputs
+- Screenshots and other collected artifacts
+
+Evidence remains permanently associated with the Recovery Case.
 
 ---
 

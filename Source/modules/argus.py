@@ -13,6 +13,12 @@ sys.path.append(str(PROJECT_ROOT))
 from core.device import Device
 from core.codex import Codex
 from modules.aegis import evaluate
+from modules.storage_query import (
+    find_mounted_descendants,
+    get_block_device_size_bytes,
+    get_logical_sector_size,
+    get_physical_sector_size,
+)
 
 
 def run_command(command):
@@ -249,6 +255,58 @@ def _smartctl_execution_warning(returncode, device_path):
         f"smartctl device open/access failure for {device_path} "
         f"(exit code {returncode})."
     )
+
+
+def observe_mounted_descendants(
+    device_path,
+    exclude_mount_targets=None,
+    session=None,
+):
+    """
+    Observe mounted descendants of a source disk for SENTINEL presentation.
+
+    Returns observation facts only. Does not unmount or decide workflow.
+    """
+
+    from modules.echo import log_info
+
+    mounted_descendants = find_mounted_descendants(
+        device_path,
+        exclude_mount_targets=exclude_mount_targets,
+    )
+
+    if session is not None:
+        if mounted_descendants:
+            mount_summary = ", ".join(
+                f"{item['device_path']} -> {item['mount_target']}"
+                for item in mounted_descendants
+            )
+            log_info(
+                session,
+                "ARGUS",
+                f"Mounted descendants observed: {mount_summary}",
+            )
+        else:
+            log_info(
+                session,
+                "ARGUS",
+                f"No mounted descendants observed for {device_path}.",
+            )
+
+    return mounted_descendants
+
+
+def observe_source_storage_identity(device_path):
+    """
+    Observe exact source storage identity facts for acquisition evidence.
+    """
+
+    return {
+        "path": device_path,
+        "size_bytes": get_block_device_size_bytes(device_path),
+        "logical_sector_size": get_logical_sector_size(device_path),
+        "physical_sector_size": get_physical_sector_size(device_path),
+    }
 
 
 def collect_smart_report(device, output_path):

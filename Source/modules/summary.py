@@ -50,7 +50,28 @@ def _imaging_summary(imaging_result, imaging_declined):
     return "Failed"
 
 
-def _photorec_summary(recovery_result, recovery_declined):
+def _recovery_method_summary(
+    recovery_selection_cancelled,
+    recovery_declined,
+    recovery_result,
+):
+    if recovery_selection_cancelled:
+        return "Cancelled by operator"
+
+    if recovery_declined or recovery_result is not None:
+        return "PhotoRec"
+
+    return "Not performed"
+
+
+def _photorec_summary(
+    recovery_result,
+    recovery_declined,
+    recovery_selection_cancelled=False,
+):
+    if recovery_selection_cancelled:
+        return "Not performed"
+
     if recovery_declined:
         return "Declined by operator"
 
@@ -63,15 +84,23 @@ def _photorec_summary(recovery_result, recovery_declined):
     return "Failed"
 
 
-def _recovered_files_summary(recovery_result, recovery_declined):
-    if recovery_declined or recovery_result is None:
+def _recovered_files_summary(
+    recovery_result,
+    recovery_declined,
+    recovery_selection_cancelled=False,
+):
+    if recovery_selection_cancelled or recovery_declined or recovery_result is None:
         return "Not performed"
 
     return str(recovery_result["recovered_file_count"])
 
 
-def _recovered_size_summary(recovery_result, recovery_declined):
-    if recovery_declined or recovery_result is None:
+def _recovered_size_summary(
+    recovery_result,
+    recovery_declined,
+    recovery_selection_cancelled=False,
+):
+    if recovery_selection_cancelled or recovery_declined or recovery_result is None:
         return "Not performed"
 
     return format_bytes(recovery_result["recovered_total_bytes"])
@@ -87,6 +116,7 @@ def print_summary(
     recovery_result=None,
     imaging_declined=False,
     recovery_declined=False,
+    recovery_selection_cancelled=False,
 ):
     """
     Display the final assessment summary.
@@ -109,16 +139,20 @@ def print_summary(
     print(f"Imaging         : {_imaging_summary(imaging_result, imaging_declined)}")
     print(f"Integrity       : {_integrity_summary(integrity_result)}")
     print(
+        f"Recovery method : "
+        f"{_recovery_method_summary(recovery_selection_cancelled, recovery_declined, recovery_result)}"
+    )
+    print(
         f"PhotoRec session: "
-        f"{_photorec_summary(recovery_result, recovery_declined)}"
+        f"{_photorec_summary(recovery_result, recovery_declined, recovery_selection_cancelled)}"
     )
     print(
         f"Recovered files : "
-        f"{_recovered_files_summary(recovery_result, recovery_declined)}"
+        f"{_recovered_files_summary(recovery_result, recovery_declined, recovery_selection_cancelled)}"
     )
     print(
         f"Recovered size  : "
-        f"{_recovered_size_summary(recovery_result, recovery_declined)}"
+        f"{_recovered_size_summary(recovery_result, recovery_declined, recovery_selection_cancelled)}"
     )
     print(f"Current status  : {session.status}")
     print(f"Case location   : {session.recovery_path}")

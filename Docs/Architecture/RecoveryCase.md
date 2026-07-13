@@ -184,91 +184,76 @@ No technical work has been performed.
 
 ---
 
-### INTAKE
-
-Customer information and recovery request are being recorded.
-
----
-
 ### ASSESSING
 
-The source device is being evaluated.
+The source device is being identified and evaluated.
 
-The recovery risk and recommended strategy are determined.
+Recovery risk and recommended strategy are being determined.
 
 ---
 
-### PREPARING
+### AWAITING_CUSTOMER_RESPONSE
 
-The recovery environment is being prepared.
+Work is paused specifically pending customer input.
 
 Examples:
 
-- Destination selected
-- Safety validation
-- Evidence collection
-- Recovery plan confirmed
+- Customer approval required
+- Missing information from the customer
+- Customer decision needed before continuing
+
+---
+
+### READY_FOR_IMAGING
+
+The destination has been approved and the case is prepared for imaging.
+
+---
+
+### IMAGING
+
+Forensic image creation is in progress.
+
+---
+
+### READY_FOR_RECOVERY
+
+A forensic image exists and the case is ready for image-based recovery.
 
 ---
 
 ### RECOVERING
 
-Recovery operations are in progress.
+A recovery operation is in progress.
 
 Examples:
 
-- Imaging
-- Logical recovery
-- File carving
-
----
-
-### VERIFYING
-
-Recovered data is being reviewed and validated.
-
----
-
-### READY_FOR_DELIVERY
-
-The recovery has been completed.
-
-Reports and recovered files are ready.
-
----
-
-### DELIVERED
-
-Recovered data has been delivered to the customer.
+- PhotoRec
+- Other file recovery tools
 
 ---
 
 ### ON_HOLD
 
-The case is temporarily paused.
+Work is paused pending input, hardware, approval, or another blocker.
 
 Examples:
 
-- Waiting for customer response
 - Waiting for replacement hardware
-- Waiting for approval
+- Waiting for internal approval
 - Waiting for additional information
 
 ---
 
-### CLOSED
+### COMPLETED
 
-The case has been completed.
-
-No further work is expected.
+Recovery work has been intentionally finalized.
 
 ---
 
-### ARCHIVED
+### CANCELLED
 
-The Recovery Case has been permanently archived.
-
-It remains available for future reference.
+The case has been intentionally stopped without completion.
 
 ---
 

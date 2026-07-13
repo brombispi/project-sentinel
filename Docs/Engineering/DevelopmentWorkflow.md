@@ -91,3 +91,11 @@ Roles:
 * Architect (Raz): Defines the product vision, workflow and engineering decisions.
 * Engineering Advisor (ChatGPT): Reviews architecture, challenges assumptions, preserves project consistency and helps design features.
 * Implementation Assistant (Cursor): Implements approved changes, proposes improvements and operates within the constraints defined by the Constitution.
+
+A feature is considered complete only when:
+
+• Implementation is finished.
+• The workflow behaves as intended.
+• Real-world testing has been performed when applicable.
+• Documentation reflects the implementation.
+• No known critical defects remain.

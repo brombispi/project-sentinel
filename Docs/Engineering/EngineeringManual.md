@@ -1,4 +1,4 @@
-# Development Workflow
+# Engineering Manual
 
 Version: 0.2
 Status: Active
@@ -115,6 +115,12 @@ If an emergency modification is made on the Raspberry Pi, it must immediately be
 
 ---
 
+# Git Discipline
+
+Before beginning new development, contributors must review the Git working tree and understand every existing modification.
+
+---
+
 # Folder Responsibilities
 
 Docs
@@ -163,6 +169,24 @@ Every new subsystem must define:
 
 ---
 
+# Review Rule
+
+Every feature must be reviewed before commit.
+
+---
+
+# Testing Order
+
+Before committing, follow this order:
+
+- Static review
+- Functional testing
+- Real hardware validation (when applicable)
+- Documentation update
+- Commit
+
+---
+
 # Session Checklist
 
 Development begins only after both systems have been verified.
@@ -188,3 +212,5 @@ Slow is smooth.
 Smooth is fast.
 
 A clean architecture is always preferred over a quick implementation.
+
+Before beginning development, check the Git working tree. Understand every modified file before introducing additional changes.

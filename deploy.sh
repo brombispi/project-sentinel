@@ -25,23 +25,27 @@ rsync -av \
 
 echo "Verifying deployment..."
 
-FILES=$(find Source -type f \
-  ! -path "*/__pycache__/*" \
-  ! -name ".DS_Store" \
-  ! -path "Source/state/*" | wc -l)
-
-REMOTE_FILES=$(ssh "$PI" "find $REMOTE -type f \
-  ! -path '$REMOTE/state/*' \
-  ! -path '$REMOTE/Recoveries/*' | wc -l")
-
-if [ "$FILES" -eq "$REMOTE_FILES" ]; then
-    echo "Verification passed."
-else
+VERIFY_OUTPUT=$(rsync -rcn --itemize-changes \
+  --exclude='__pycache__' \
+  --exclude='*.pyc' \
+  --exclude='.DS_Store' \
+  --exclude='state/' \
+  --exclude='Recoveries/' \
+  Source/ "$PI:$REMOTE/" 2>&1) || {
     echo "Verification FAILED."
-    echo "Local files : $FILES"
-    echo "Remote files: $REMOTE_FILES"
+    printf '%s\n' "$VERIFY_OUTPUT"
+    exit 1
+}
+
+DIFFS=$(printf '%s\n' "$VERIFY_OUTPUT" | grep -E '^>' || true)
+
+if [ -n "$DIFFS" ]; then
+    echo "Verification FAILED."
+    printf '%s\n' "$DIFFS"
     exit 1
 fi
+
+echo "Verification passed."
 
 echo
 echo "SUCCESS: Deployment complete."
