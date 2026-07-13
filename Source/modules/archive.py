@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from core.status import RecoveryStatus
 from modules.echo import log_info, log_error, log_warning
+from modules.manifest import write_initial_case_manifest
 from core.session import RecoverySession
 from services.session_registry import SessionRegistry
 from modules.storage_query import (
@@ -47,16 +48,17 @@ def create_session():
     recovery_path = create_recovery_folder(session_id)
 
     session = RecoverySession(
-    session_id=session_id,
-    created_at=datetime.now(),
-    status=RecoveryStatus.NEW,
-    recovery_path=recovery_path,
-    case_name=""
+        session_id=session_id,
+        created_at=datetime.now(),
+        status=RecoveryStatus.NEW,
+        recovery_path=recovery_path,
+        case_name="",
     )
+    write_initial_case_manifest(session)
     log_info(
-    session,
-    "ARCHIVE",
-    "Recovery session created."
+        session,
+        "ARCHIVE",
+        "Recovery session created.",
     )
 
     return session

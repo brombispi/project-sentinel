@@ -26,6 +26,7 @@ from modules.archive import (
     verify_forensic_image,
 )
 from modules.echo import log_info, log_operator, log_warning, log_error
+from modules.manifest import write_initial_case_manifest
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
 from modules.janus import evaluate_destination
@@ -34,6 +35,8 @@ from modules.device_selection import (
     select_source_device,
     select_destination_device,
 )
+from modules.case_discovery import discover_cases, get_runtime_recoveries_root
+from modules.case_loader import load_case, resolve_resume_status
 from core.codex import Codex
 from core.status import RecoveryStatus
 
@@ -309,232 +312,80 @@ def _run_recovery_method_selection(session, assessment, intake):
     return None, False, True
 
 
-print("==========================================")
-print("PROJECT SENTINEL")
-print("==========================================")
-print()
+def _print_assessment_context(source_device, assessment, strategy):
+    print(f"Device     : {source_device.path}")
+    print(f"Model      : {source_device.model}")
+    print(f"Serial     : {source_device.serial}")
+    print(f"Filesystem : {source_device.filesystem}")
+    print(f"Role       : {source_device.role}")
+    print()
 
-case_name = input("Case name: ").strip()
+    codex = Codex()
 
-session = create_session()
-intake = collect_case_intake()
+    print("CODEX")
 
-session.case_name = case_name
+    for filesystem in source_device.filesystem.split(","):
+        key = filesystem.strip().lower()
+        knowledge = codex.lookup("filesystem", key)
 
-if session.case_name == "":
-    session.case_name = session.session_id
+        if knowledge:
+            print(f"Filesystem : {key}")
 
-log_info(
-    session,
-    "SENTINEL",
-    f"Case name set: {session.case_name}"
-)
+            if "warning" in knowledge:
+                print(f"Warning    : {knowledge['warning']}")
 
-log_info(
-    session,
-    "INTAKE",
-    "Recovery case intake completed."
-)
+            if "risk" in knowledge:
+                print(f"Risk       : {knowledge['risk']}")
 
-log_info(
-    session,
-    "SENTINEL",
-    "Assessment started."
-)
+            if "recommended_action" in knowledge:
+                print(f"Action     : {knowledge['recommended_action']}")
 
-devices = detect_devices()
-device_count = len(devices)
+            print()
 
-if device_count == 1:
-    log_info(
-        session,
-        "ARGUS",
-        f"Detected 1 storage device: {devices[0].path}"
-    )
-else:
-    log_info(
-        session,
-        "ARGUS",
-        f"Detected {device_count} storage devices."
-    )
-
-print(f"Recovery Case : {session.session_id}")
-print(f"Case Name     : {session.case_name}")
-print()
-
-print_device_selection_list(
-    "SOURCE DEVICE SELECTION",
-    devices
-)
-
-source_device = select_source_device(devices)
-session.source_device = source_device
-
-assessment = evaluate(session.source_device)
-session.assessment = assessment
-
-update_status(
-    session,
-    RecoveryStatus.ASSESSING,
-    session.source_device,
-    assessment,
-    intake=intake,
-)
-
-strategy = create_strategy(assessment)
-
-log_info(
-    session,
-    "ORACLE",
-    f"Strategy generated: {strategy.status} / {strategy.priority}"
-)
-
-log_info(
-    session,
-    "CODEX",
-    f"Knowledge applied for: {source_device.filesystem}"
-)
-
-print(f"Device     : {source_device.path}")
-print(f"Model      : {source_device.model}")
-print(f"Serial     : {source_device.serial}")
-print(f"Filesystem : {source_device.filesystem}")
-print(f"Role       : {source_device.role}")
-print()
-
-codex = Codex()
-
-print("CODEX")
-
-for filesystem in source_device.filesystem.split(","):
-    key = filesystem.strip().lower()
-    knowledge = codex.lookup("filesystem", key)
-
-    if knowledge:
-        print(f"Filesystem : {key}")
-
-        if "warning" in knowledge:
-            print(f"Warning    : {knowledge['warning']}")
-
-        if "risk" in knowledge:
-            print(f"Risk       : {knowledge['risk']}")
-
-        if "recommended_action" in knowledge:
-            print(f"Action     : {knowledge['recommended_action']}")
-
-        print()
-
-print("AEGIS")
-print(f"Decision   : {assessment.decision.status}")
-print(f"Reason     : {assessment.decision.reason}")
-
-print()
-print("ORACLE")
-print(f"Goal       : {strategy.goal}")
-print(f"Priority   : {strategy.priority}")
-
-print()
-print("Strategy")
-
-for step in strategy.steps:
-    print(f"- {step}")
-
-smart_result = None
-imaging_result = None
-integrity_result = None
-recovery_result = None
-imaging_declined = False
-recovery_declined = False
-recovery_selection_cancelled = False
-
-if assessment.decision.status == "STOP":
-    update_status(
-        session,
-        RecoveryStatus.ON_HOLD,
-        session.source_device,
-        assessment,
-        intake=intake
-    )
-
-    log_warning(
-        session,
-        "AEGIS",
-        f"Decision: STOP ({assessment.decision.reason})"
-    )
-else:
-    log_info(
-        session,
-        "AEGIS",
-        f"Decision: {assessment.decision.status}"
-    )
-
-    smart_output_path = (
-        Path(session.recovery_path) / "evidence" / "source.smart.txt"
-    )
-    smart_result = collect_smart_report(
-        session.source_device,
-        smart_output_path,
-    )
+    print("AEGIS")
+    print(f"Decision   : {assessment.decision.status}")
+    print(f"Reason     : {assessment.decision.reason}")
 
     print()
-    print("SMART")
-    print(f"Available  : {'YES' if smart_result['available'] else 'NO'}")
-    print(f"Health     : {smart_result['health']}")
-    print(f"Saved to   : {smart_result['output_path']}")
+    print("ORACLE")
+    print(f"Goal       : {strategy.goal}")
+    print(f"Priority   : {strategy.priority}")
 
-    if smart_result["warning"]:
-        print(f"Warning    : {smart_result['warning']}")
+    print()
+    print("Strategy")
 
-    if smart_result["available"]:
+    for step in strategy.steps:
+        print(f"- {step}")
+
+
+def _run_acquisition_workflow(session, devices, assessment, intake):
+    imaging_result = None
+    integrity_result = None
+    recovery_result = None
+    imaging_declined = False
+    recovery_declined = False
+    recovery_selection_cancelled = False
+
+    acquisition_state = classify_acquisition_state(session.recovery_path)
+    log_info(
+        session,
+        "SENTINEL",
+        f"Acquisition state classified: {acquisition_state['state']}",
+    )
+
+    if acquisition_state["state"] == "completed_canonical":
+        print()
+        print("IMAGING REFUSED")
+        print(acquisition_state["message"])
+        print(
+            "The canonical forensic image and SHA-256 fingerprint are "
+            "already preserved."
+        )
         log_info(
             session,
-            "ARGUS",
-            f"SMART report collected: health {smart_result['health']}",
+            "SENTINEL",
+            "Resume refused: canonical acquisition complete.",
         )
-    else:
-        log_warning(
-            session,
-            "ARGUS",
-            smart_result["warning"] or "SMART report unavailable.",
-        )
-
-    destination_candidates = [
-        device for device in devices
-        if device.path != session.source_device.path
-    ]
-
-    print_device_selection_list(
-        "DESTINATION DEVICE SELECTION",
-        destination_candidates
-    )
-
-    session.destination_device = select_destination_device(
-        destination_candidates
-    )
-    destination_assessment = evaluate_destination(session.destination_device)
-
-    print()
-    print("JANUS")
-    print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
-    print(f"Reason    : {destination_assessment.reason}")
-    print(f"Risk      : {destination_assessment.risk}")
-
-    case_relocated = False
-
-    if destination_assessment.approved:
-        relocate_result = relocate_recovery_case(
-            session,
-            session.destination_device.mount_point,
-        )
-
-        print()
-        print("ARCHIVE")
-        print(f"Status     : {relocate_result['status']}")
-        print(f"Result     : {relocate_result['message']}")
-
-        case_relocated = relocate_result["success"]
-
-    if destination_assessment.approved and case_relocated:
         update_status(
             session,
             RecoveryStatus.READY_FOR_IMAGING,
@@ -542,153 +393,157 @@ else:
             assessment,
             intake=intake,
         )
-    else:
-        save_case(session, intake=intake)
 
-    if destination_assessment.approved and case_relocated:
-        acquisition_state = classify_acquisition_state(session.recovery_path)
+    elif acquisition_state["state"] == "inconsistent_artifacts":
+        print()
+        print("IMAGING REFUSED")
+        print(acquisition_state["message"])
+        print(
+            "Manual investigation is required before any imaging action."
+        )
+        log_error(
+            session,
+            "SENTINEL",
+            "Inconsistent acquisition artifacts detected.",
+        )
+        update_status(
+            session,
+            RecoveryStatus.READY_FOR_IMAGING,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+
+    elif acquisition_state["state"] == "invalid_map":
+        print()
+        print("IMAGING REFUSED")
+        print(acquisition_state["message"])
+        print(
+            "Sentinel will not resume, overwrite, or delete the "
+            "existing artifacts."
+        )
+        log_error(
+            session,
+            "SENTINEL",
+            "Resume refused: unreadable ddrescue map.",
+        )
+        update_status(
+            session,
+            RecoveryStatus.READY_FOR_IMAGING,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+
+    elif acquisition_state["state"] == (
+        "imaging_complete_fingerprint_missing"
+    ):
+        print()
+        print("FINGERPRINT RETRY")
+        print(
+            "Imaging is complete. SHA-256 fingerprint has not been "
+            "recorded."
+        )
+        print(
+            "Sentinel will record the fingerprint now. ddrescue will "
+            "not run again."
+        )
         log_info(
             session,
             "SENTINEL",
-            f"Acquisition state classified: {acquisition_state['state']}",
+            "Fingerprint retry offered.",
         )
 
-        if acquisition_state["state"] == "completed_canonical":
-            print()
-            print("IMAGING REFUSED")
-            print(acquisition_state["message"])
-            print(
-                "The canonical forensic image and SHA-256 fingerprint are "
-                "already preserved."
-            )
-            log_info(
+        fingerprint_confirm = input(
+            "Proceed with fingerprinting? [y/N]: "
+        ).strip().lower()
+
+        if fingerprint_confirm == "y":
+            log_operator(
                 session,
                 "SENTINEL",
-                "Resume refused: canonical acquisition complete.",
+                "Fingerprint retry approved.",
             )
-            update_status(
-                session,
-                RecoveryStatus.READY_FOR_IMAGING,
-                session.source_device,
-                assessment,
-                intake=intake,
-            )
+            integrity_result = verify_forensic_image(session)
 
-        elif acquisition_state["state"] == "inconsistent_artifacts":
             print()
-            print("IMAGING REFUSED")
-            print(acquisition_state["message"])
-            print(
-                "Manual investigation is required before any imaging action."
-            )
-            log_error(
-                session,
-                "SENTINEL",
-                "Inconsistent acquisition artifacts detected.",
-            )
-            update_status(
-                session,
-                RecoveryStatus.READY_FOR_IMAGING,
-                session.source_device,
-                assessment,
-                intake=intake,
-            )
+            print("INTEGRITY")
+            print(f"Image      : {integrity_result['image_filename']}")
+            print(f"Algorithm  : {integrity_result['algorithm']}")
 
-        elif acquisition_state["state"] == "invalid_map":
-            print()
-            print("IMAGING REFUSED")
-            print(acquisition_state["message"])
-            print(
-                "Sentinel will not resume, overwrite, or delete the "
-                "existing artifacts."
-            )
-            log_error(
-                session,
-                "SENTINEL",
-                "Resume refused: unreadable ddrescue map.",
-            )
-            update_status(
-                session,
-                RecoveryStatus.READY_FOR_IMAGING,
-                session.source_device,
-                assessment,
-                intake=intake,
-            )
+            if integrity_result["success"]:
+                print("Result     : Hash recorded")
+                print(f"SHA-256    : {integrity_result['digest']}")
+                print(f"Saved to   : {integrity_result['evidence_path']}")
 
-        elif acquisition_state["state"] == (
-            "imaging_complete_fingerprint_missing"
-        ):
-            print()
-            print("FINGERPRINT RETRY")
-            print(
-                "Imaging is complete. SHA-256 fingerprint has not been "
-                "recorded."
-            )
-            print(
-                "Sentinel will record the fingerprint now. ddrescue will "
-                "not run again."
-            )
-            log_info(
-                session,
-                "SENTINEL",
-                "Fingerprint retry offered.",
-            )
-
-            fingerprint_confirm = input(
-                "Proceed with fingerprinting? [y/N]: "
-            ).strip().lower()
-
-            if fingerprint_confirm == "y":
-                log_operator(
+                update_status(
                     session,
-                    "SENTINEL",
-                    "Fingerprint retry approved.",
+                    RecoveryStatus.READY_FOR_RECOVERY,
+                    session.source_device,
+                    assessment,
+                    intake=intake,
                 )
-                integrity_result = verify_forensic_image(session)
 
-                print()
-                print("INTEGRITY")
-                print(f"Image      : {integrity_result['image_filename']}")
-                print(f"Algorithm  : {integrity_result['algorithm']}")
-
-                if integrity_result["success"]:
-                    print("Result     : Hash recorded")
-                    print(f"SHA-256    : {integrity_result['digest']}")
-                    print(f"Saved to   : {integrity_result['evidence_path']}")
-
-                    update_status(
-                        session,
-                        RecoveryStatus.READY_FOR_RECOVERY,
-                        session.source_device,
-                        assessment,
-                        intake=intake,
-                    )
-
-                    (
-                        recovery_result,
-                        recovery_declined,
-                        recovery_selection_cancelled,
-                    ) = _run_recovery_method_selection(
-                        session,
-                        assessment,
-                        intake,
-                    )
-                else:
-                    print("Result     : Failed")
-                    print(f"Error      : {integrity_result['message']}")
-                    update_status(
-                        session,
-                        RecoveryStatus.READY_FOR_IMAGING,
-                        session.source_device,
-                        assessment,
-                        intake=intake,
-                    )
+                (
+                    recovery_result,
+                    recovery_declined,
+                    recovery_selection_cancelled,
+                ) = _run_recovery_method_selection(
+                    session,
+                    assessment,
+                    intake,
+                )
             else:
-                imaging_declined = True
-                log_operator(
+                print("Result     : Failed")
+                print(f"Error      : {integrity_result['message']}")
+                update_status(
+                    session,
+                    RecoveryStatus.READY_FOR_IMAGING,
+                    session.source_device,
+                    assessment,
+                    intake=intake,
+                )
+        else:
+            imaging_declined = True
+            log_operator(
+                session,
+                "SENTINEL",
+                "Fingerprint retry declined.",
+            )
+            update_status(
+                session,
+                RecoveryStatus.READY_FOR_IMAGING,
+                session.source_device,
+                assessment,
+                intake=intake,
+            )
+
+    elif acquisition_state["state"] in (
+        "no_acquisition",
+        "incomplete_ddrescue",
+    ):
+        if acquisition_state["state"] == "incomplete_ddrescue":
+            identity_result = validate_source_identity_for_resume(session)
+
+            print()
+            print("RESUME FORENSIC IMAGING")
+            print(
+                f"Image      : {session.recovery_path}/images/source.img"
+            )
+            print(
+                f"Map        : {session.recovery_path}/images/source.map"
+            )
+            print()
+            _print_identity_comparison(identity_result)
+            print()
+
+            if not identity_result["valid"]:
+                print("IMAGING REFUSED")
+                print(identity_result["message"])
+                log_error(
                     session,
                     "SENTINEL",
-                    "Fingerprint retry declined.",
+                    "Resume refused: identity mismatch.",
                 )
                 update_status(
                     session,
@@ -697,169 +552,6 @@ else:
                     assessment,
                     intake=intake,
                 )
-
-        elif acquisition_state["state"] in (
-            "no_acquisition",
-            "incomplete_ddrescue",
-        ):
-            if acquisition_state["state"] == "incomplete_ddrescue":
-                identity_result = validate_source_identity_for_resume(session)
-
-                print()
-                print("RESUME FORENSIC IMAGING")
-                print(
-                    f"Image      : {session.recovery_path}/images/source.img"
-                )
-                print(
-                    f"Map        : {session.recovery_path}/images/source.map"
-                )
-                print()
-                _print_identity_comparison(identity_result)
-                print()
-
-                if not identity_result["valid"]:
-                    print("IMAGING REFUSED")
-                    print(identity_result["message"])
-                    log_error(
-                        session,
-                        "SENTINEL",
-                        "Resume refused: identity mismatch.",
-                    )
-                    update_status(
-                        session,
-                        RecoveryStatus.READY_FOR_IMAGING,
-                        session.source_device,
-                        assessment,
-                        intake=intake,
-                    )
-                else:
-                    mount_gate_passed, exclude_mount_targets = (
-                        _run_mount_safety_gate(session, devices)
-                    )
-
-                    if not mount_gate_passed:
-                        update_status(
-                            session,
-                            RecoveryStatus.READY_FOR_IMAGING,
-                            session.source_device,
-                            assessment,
-                            intake=intake,
-                        )
-                    else:
-                        print(
-                            "ddrescue will continue using the existing "
-                            "source.img and source.map."
-                        )
-
-                        confirm = input(
-                            "Proceed with forensic imaging resume? [y/N]: "
-                        ).strip().lower()
-
-                        if confirm == "y":
-                            update_status(
-                                session,
-                                RecoveryStatus.IMAGING,
-                                session.source_device,
-                                assessment,
-                                intake=intake,
-                            )
-
-                            imaging_result = execute_forensic_image(
-                                session,
-                                resume=True,
-                                exclude_mount_targets=exclude_mount_targets,
-                            )
-
-                            print()
-                            print("ARCHIVE")
-                            print(f"Status     : {imaging_result['status']}")
-                            print(f"Result     : {imaging_result['message']}")
-
-                            if imaging_result["artifacts"]:
-                                print("Artifacts  :")
-                                for artifact in imaging_result["artifacts"]:
-                                    print(f"- {artifact}")
-
-                            if imaging_result["success"]:
-                                integrity_result = verify_forensic_image(
-                                    session
-                                )
-
-                                print()
-                                print("INTEGRITY")
-                                print(
-                                    f"Image      : "
-                                    f"{integrity_result['image_filename']}"
-                                )
-                                print(
-                                    f"Algorithm  : "
-                                    f"{integrity_result['algorithm']}"
-                                )
-
-                                if integrity_result["success"]:
-                                    print("Result     : Hash recorded")
-                                    print(
-                                        f"SHA-256    : "
-                                        f"{integrity_result['digest']}"
-                                    )
-                                    print(
-                                        f"Saved to   : "
-                                        f"{integrity_result['evidence_path']}"
-                                    )
-                                else:
-                                    print("Result     : Failed")
-                                    print(
-                                        f"Error      : "
-                                        f"{integrity_result['message']}"
-                                    )
-
-                                if integrity_result["success"]:
-                                    update_status(
-                                        session,
-                                        RecoveryStatus.READY_FOR_RECOVERY,
-                                        session.source_device,
-                                        assessment,
-                                        intake=intake,
-                                    )
-                                    (
-                                        recovery_result,
-                                        recovery_declined,
-                                        recovery_selection_cancelled,
-                                    ) = _run_recovery_method_selection(
-                                        session,
-                                        assessment,
-                                        intake,
-                                    )
-                                else:
-                                    update_status(
-                                        session,
-                                        RecoveryStatus.READY_FOR_IMAGING,
-                                        session.source_device,
-                                        assessment,
-                                        intake=intake,
-                                    )
-                            else:
-                                update_status(
-                                    session,
-                                    RecoveryStatus.READY_FOR_IMAGING,
-                                    session.source_device,
-                                    assessment,
-                                    intake=intake,
-                                )
-                        else:
-                            imaging_declined = True
-                            log_operator(
-                                session,
-                                "SENTINEL",
-                                "Forensic imaging resume declined.",
-                            )
-                            update_status(
-                                session,
-                                RecoveryStatus.READY_FOR_IMAGING,
-                                session.source_device,
-                                assessment,
-                                intake=intake,
-                            )
             else:
                 mount_gate_passed, exclude_mount_targets = (
                     _run_mount_safety_gate(session, devices)
@@ -874,19 +566,13 @@ else:
                         intake=intake,
                     )
                 else:
-                    print()
-                    print("NEW FORENSIC IMAGING")
-                    print("Operation  : Create forensic image")
-                    print(f"Source     : {session.source_device.path}")
                     print(
-                        f"Output     : {session.recovery_path}/images/source.img"
-                    )
-                    print(
-                        f"Map        : {session.recovery_path}/images/source.map"
+                        "ddrescue will continue using the existing "
+                        "source.img and source.map."
                     )
 
                     confirm = input(
-                        "Proceed with forensic imaging? [y/N]: "
+                        "Proceed with forensic imaging resume? [y/N]: "
                     ).strip().lower()
 
                     if confirm == "y":
@@ -900,7 +586,7 @@ else:
 
                         imaging_result = execute_forensic_image(
                             session,
-                            resume=False,
+                            resume=True,
                             exclude_mount_targets=exclude_mount_targets,
                         )
 
@@ -915,7 +601,9 @@ else:
                                 print(f"- {artifact}")
 
                         if imaging_result["success"]:
-                            integrity_result = verify_forensic_image(session)
+                            integrity_result = verify_forensic_image(
+                                session
+                            )
 
                             print()
                             print("INTEGRITY")
@@ -983,7 +671,7 @@ else:
                         log_operator(
                             session,
                             "SENTINEL",
-                            "New forensic imaging declined.",
+                            "Forensic imaging resume declined.",
                         )
                         update_status(
                             session,
@@ -992,25 +680,874 @@ else:
                             assessment,
                             intake=intake,
                         )
+        else:
+            mount_gate_passed, exclude_mount_targets = (
+                _run_mount_safety_gate(session, devices)
+            )
 
-print()
-print_summary(
-    assessment,
-    strategy,
-    session,
-    smart_result=smart_result,
-    imaging_result=imaging_result,
-    integrity_result=integrity_result,
-    recovery_result=recovery_result,
-    imaging_declined=imaging_declined,
-    recovery_declined=recovery_declined,
-    recovery_selection_cancelled=recovery_selection_cancelled,
-)
+            if not mount_gate_passed:
+                update_status(
+                    session,
+                    RecoveryStatus.READY_FOR_IMAGING,
+                    session.source_device,
+                    assessment,
+                    intake=intake,
+                )
+            else:
+                print()
+                print("NEW FORENSIC IMAGING")
+                print("Operation  : Create forensic image")
+                print(f"Source     : {session.source_device.path}")
+                print(
+                    f"Output     : {session.recovery_path}/images/source.img"
+                )
+                print(
+                    f"Map        : {session.recovery_path}/images/source.map"
+                )
 
-print("-" * 40)
+                confirm = input(
+                    "Proceed with forensic imaging? [y/N]: "
+                ).strip().lower()
 
-log_info(
-    session,
-    "SENTINEL",
-    "Assessment completed."
-)
+                if confirm == "y":
+                    update_status(
+                        session,
+                        RecoveryStatus.IMAGING,
+                        session.source_device,
+                        assessment,
+                        intake=intake,
+                    )
+
+                    imaging_result = execute_forensic_image(
+                        session,
+                        resume=False,
+                        exclude_mount_targets=exclude_mount_targets,
+                    )
+
+                    print()
+                    print("ARCHIVE")
+                    print(f"Status     : {imaging_result['status']}")
+                    print(f"Result     : {imaging_result['message']}")
+
+                    if imaging_result["artifacts"]:
+                        print("Artifacts  :")
+                        for artifact in imaging_result["artifacts"]:
+                            print(f"- {artifact}")
+
+                    if imaging_result["success"]:
+                        integrity_result = verify_forensic_image(session)
+
+                        print()
+                        print("INTEGRITY")
+                        print(
+                            f"Image      : "
+                            f"{integrity_result['image_filename']}"
+                        )
+                        print(
+                            f"Algorithm  : "
+                            f"{integrity_result['algorithm']}"
+                        )
+
+                        if integrity_result["success"]:
+                            print("Result     : Hash recorded")
+                            print(
+                                f"SHA-256    : "
+                                f"{integrity_result['digest']}"
+                            )
+                            print(
+                                f"Saved to   : "
+                                f"{integrity_result['evidence_path']}"
+                            )
+                        else:
+                            print("Result     : Failed")
+                            print(
+                                f"Error      : "
+                                f"{integrity_result['message']}"
+                            )
+
+                        if integrity_result["success"]:
+                            update_status(
+                                session,
+                                RecoveryStatus.READY_FOR_RECOVERY,
+                                session.source_device,
+                                assessment,
+                                intake=intake,
+                            )
+                            (
+                                recovery_result,
+                                recovery_declined,
+                                recovery_selection_cancelled,
+                            ) = _run_recovery_method_selection(
+                                session,
+                                assessment,
+                                intake,
+                            )
+                        else:
+                            update_status(
+                                session,
+                                RecoveryStatus.READY_FOR_IMAGING,
+                                session.source_device,
+                                assessment,
+                                intake=intake,
+                            )
+                    else:
+                        update_status(
+                            session,
+                            RecoveryStatus.READY_FOR_IMAGING,
+                            session.source_device,
+                            assessment,
+                            intake=intake,
+                        )
+                else:
+                    imaging_declined = True
+                    log_operator(
+                        session,
+                        "SENTINEL",
+                        "New forensic imaging declined.",
+                    )
+                    update_status(
+                        session,
+                        RecoveryStatus.READY_FOR_IMAGING,
+                        session.source_device,
+                        assessment,
+                        intake=intake,
+                    )
+
+    return {
+        "imaging_result": imaging_result,
+        "integrity_result": integrity_result,
+        "recovery_result": recovery_result,
+        "imaging_declined": imaging_declined,
+        "recovery_declined": recovery_declined,
+        "recovery_selection_cancelled": recovery_selection_cancelled,
+    }
+
+
+def _run_assessment_pipeline(session, intake, devices):
+    smart_result = None
+    workflow_results = {
+        "imaging_result": None,
+        "integrity_result": None,
+        "recovery_result": None,
+        "imaging_declined": False,
+        "recovery_declined": False,
+        "recovery_selection_cancelled": False,
+    }
+
+    if session.source_device is None:
+        print_device_selection_list(
+            "SOURCE DEVICE SELECTION",
+            devices,
+        )
+        source_device = select_source_device(devices)
+        session.source_device = source_device
+        assessment = evaluate(session.source_device)
+        session.assessment = assessment
+
+        update_status(
+            session,
+            RecoveryStatus.ASSESSING,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+    else:
+        assessment = session.assessment
+        source_device = session.source_device
+
+    strategy = create_strategy(assessment)
+
+    log_info(
+        session,
+        "ORACLE",
+        f"Strategy generated: {strategy.status} / {strategy.priority}",
+    )
+
+    log_info(
+        session,
+        "CODEX",
+        f"Knowledge applied for: {source_device.filesystem}",
+    )
+
+    _print_assessment_context(source_device, assessment, strategy)
+
+    if assessment.decision.status == "STOP":
+        update_status(
+            session,
+            RecoveryStatus.ON_HOLD,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+
+        log_warning(
+            session,
+            "AEGIS",
+            f"Decision: STOP ({assessment.decision.reason})",
+        )
+        return strategy, smart_result, workflow_results
+
+    log_info(
+        session,
+        "AEGIS",
+        f"Decision: {assessment.decision.status}",
+    )
+
+    smart_output_path = (
+        Path(session.recovery_path) / "evidence" / "source.smart.txt"
+    )
+    smart_result = collect_smart_report(
+        session.source_device,
+        smart_output_path,
+    )
+
+    print()
+    print("SMART")
+    print(f"Available  : {'YES' if smart_result['available'] else 'NO'}")
+    print(f"Health     : {smart_result['health']}")
+    print(f"Saved to   : {smart_result['output_path']}")
+
+    if smart_result["warning"]:
+        print(f"Warning    : {smart_result['warning']}")
+
+    if smart_result["available"]:
+        log_info(
+            session,
+            "ARGUS",
+            f"SMART report collected: health {smart_result['health']}",
+        )
+    else:
+        log_warning(
+            session,
+            "ARGUS",
+            smart_result["warning"] or "SMART report unavailable.",
+        )
+
+    if session.destination_device is None:
+        destination_candidates = [
+            device for device in devices
+            if device.path != session.source_device.path
+        ]
+
+        print_device_selection_list(
+            "DESTINATION DEVICE SELECTION",
+            destination_candidates,
+        )
+
+        session.destination_device = select_destination_device(
+            destination_candidates
+        )
+
+    destination_assessment = evaluate_destination(session.destination_device)
+
+    print()
+    print("JANUS")
+    print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
+    print(f"Reason    : {destination_assessment.reason}")
+    print(f"Risk      : {destination_assessment.risk}")
+
+    case_relocated = False
+    recovery_path = Path(session.recovery_path).resolve()
+    local_runtime_case = (
+        recovery_path.parent == get_runtime_recoveries_root().resolve()
+    )
+
+    if destination_assessment.approved and local_runtime_case:
+        relocate_result = relocate_recovery_case(
+            session,
+            session.destination_device.mount_point,
+        )
+
+        print()
+        print("ARCHIVE")
+        print(f"Status     : {relocate_result['status']}")
+        print(f"Result     : {relocate_result['message']}")
+
+        case_relocated = relocate_result["success"]
+    elif destination_assessment.approved:
+        case_relocated = True
+
+    if destination_assessment.approved and case_relocated:
+        update_status(
+            session,
+            RecoveryStatus.READY_FOR_IMAGING,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+        workflow_results = _run_acquisition_workflow(
+            session,
+            devices,
+            assessment,
+            intake,
+        )
+    else:
+        save_case(session, intake=intake)
+
+    return strategy, smart_result, workflow_results
+
+
+def _finish_session(session, assessment, strategy, smart_result, workflow_results):
+    print()
+    print_summary(
+        assessment,
+        strategy,
+        session,
+        smart_result=smart_result,
+        imaging_result=workflow_results["imaging_result"],
+        integrity_result=workflow_results["integrity_result"],
+        recovery_result=workflow_results["recovery_result"],
+        imaging_declined=workflow_results["imaging_declined"],
+        recovery_declined=workflow_results["recovery_declined"],
+        recovery_selection_cancelled=workflow_results[
+            "recovery_selection_cancelled"
+        ],
+    )
+
+    print("-" * 40)
+
+    log_info(
+        session,
+        "SENTINEL",
+        "Assessment completed.",
+    )
+
+
+def _resolve_assessment(session, assessment):
+    if assessment is not None:
+        return assessment
+
+    return session.assessment
+
+
+def _require_assessment(session, assessment, workflow_name):
+    resolved = _resolve_assessment(session, assessment)
+
+    if resolved is not None:
+        return resolved
+
+    log_error(
+        session,
+        "SENTINEL",
+        f"{workflow_name} requires a persisted assessment.",
+    )
+    print()
+    print(
+        f"Cannot continue {workflow_name.lower()}: persisted assessment "
+        "is missing from case.json."
+    )
+    return None
+
+
+def route_case(session, intake, assessment, devices, warnings):
+    for warning in warnings:
+        log_warning(session, "SENTINEL", warning)
+
+    log_info(
+        session,
+        "SENTINEL",
+        f"Case opened: {session.session_id}",
+    )
+
+    if session.source_device:
+        log_info(
+            session,
+            "SENTINEL",
+            f"Source device re-identified: {session.source_device.path}",
+        )
+
+    if session.destination_device:
+        log_info(
+            session,
+            "SENTINEL",
+            f"Destination device re-identified: "
+            f"{session.destination_device.path}",
+        )
+
+    log_info(
+        session,
+        "SENTINEL",
+        f"Routing case by status={session.status}",
+    )
+
+    smart_result = None
+    workflow_results = {
+        "imaging_result": None,
+        "integrity_result": None,
+        "recovery_result": None,
+        "imaging_declined": False,
+        "recovery_declined": False,
+        "recovery_selection_cancelled": False,
+    }
+    strategy = None
+
+    status = session.status
+
+    if status in (
+        RecoveryStatus.COMPLETED,
+        RecoveryStatus.CANCELLED,
+    ):
+        print()
+        print(f"Case status: {status}")
+        print("Recovery work was previously finalized for this case.")
+        reopen_confirm = input(
+            "Reopen case for additional work? [y/N]: "
+        ).strip().lower()
+
+        if reopen_confirm != "y":
+            log_operator(
+                session,
+                "SENTINEL",
+                "Case reopen declined.",
+            )
+            return
+
+        log_operator(
+            session,
+            "SENTINEL",
+            "Case reopen approved.",
+        )
+        status = resolve_resume_status(session)
+        assessment = _require_assessment(
+            session,
+            assessment,
+            "Case reopen",
+        )
+        if assessment is None:
+            return
+
+        if session.source_device is None:
+            log_error(
+                session,
+                "SENTINEL",
+                "Case reopen refused: source device is not connected.",
+            )
+            print()
+            print(
+                "Cannot reopen case: source device is not connected."
+            )
+            return
+
+        update_status(
+            session,
+            status,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+        log_info(
+            session,
+            "SENTINEL",
+            f"State routing decision: reopened to {status}",
+        )
+
+    if status in (
+        RecoveryStatus.ON_HOLD,
+        RecoveryStatus.AWAITING_CUSTOMER_RESPONSE,
+    ):
+        print()
+        print(f"Case status: {status}")
+        print("Work is paused for this case.")
+        resume_confirm = input("Resume work? [y/N]: ").strip().lower()
+
+        if resume_confirm != "y":
+            log_operator(
+                session,
+                "SENTINEL",
+                "Case resume declined.",
+            )
+            return
+
+        log_operator(
+            session,
+            "SENTINEL",
+            "Case resume approved.",
+        )
+        status = resolve_resume_status(session)
+        session.status = status
+        if session.source_device and assessment:
+            update_status(
+                session,
+                status,
+                session.source_device,
+                assessment,
+                intake=intake,
+            )
+        log_info(
+            session,
+            "SENTINEL",
+            f"State routing decision: resumed to {status}",
+        )
+
+    print(f"Recovery Case : {session.session_id}")
+    print(f"Case Name     : {session.case_name}")
+    print(f"Case Location : {session.recovery_path}")
+    print()
+
+    if status == RecoveryStatus.NEW:
+        if not intake.get("intake"):
+            intake = collect_case_intake()
+            log_info(
+                session,
+                "INTAKE",
+                "Recovery case intake completed.",
+            )
+
+        log_info(
+            session,
+            "SENTINEL",
+            "Assessment started.",
+        )
+        strategy, smart_result, workflow_results = (
+            _run_assessment_pipeline(session, intake, devices)
+        )
+        _finish_session(
+            session,
+            assessment or session.assessment,
+            strategy,
+            smart_result,
+            workflow_results,
+        )
+        return
+
+    if status == RecoveryStatus.ASSESSING:
+        assessment = _require_assessment(
+            session,
+            assessment,
+            "Assessment workflow",
+        )
+        if assessment is None:
+            return
+
+        strategy, smart_result, workflow_results = (
+            _run_assessment_pipeline(session, intake, devices)
+        )
+        _finish_session(
+            session,
+            assessment or session.assessment,
+            strategy,
+            smart_result,
+            workflow_results,
+        )
+        return
+
+    if status in (
+        RecoveryStatus.READY_FOR_IMAGING,
+        RecoveryStatus.IMAGING,
+    ):
+        if session.source_device is None:
+            log_error(
+                session,
+                "SENTINEL",
+                "Source device missing; cannot continue imaging workflow.",
+            )
+            print()
+            print(
+                "Source device is not connected. Connect the source device "
+                "and open the case again."
+            )
+            return
+
+        assessment = _require_assessment(
+            session,
+            assessment,
+            "Imaging workflow",
+        )
+        if assessment is None:
+            return
+
+        acquisition_state = classify_acquisition_state(session.recovery_path)
+
+        if acquisition_state["state"] == "completed_canonical":
+            log_warning(
+                session,
+                "SENTINEL",
+                (
+                    f"Stale persisted status {status}; canonical acquisition "
+                    "is complete. Routing to READY_FOR_RECOVERY."
+                ),
+            )
+            update_status(
+                session,
+                RecoveryStatus.READY_FOR_RECOVERY,
+                session.source_device,
+                assessment,
+                intake=intake,
+            )
+            status = RecoveryStatus.READY_FOR_RECOVERY
+        else:
+            strategy = create_strategy(assessment)
+            workflow_results = _run_acquisition_workflow(
+                session,
+                devices,
+                assessment,
+                intake,
+            )
+            _finish_session(
+                session,
+                assessment,
+                strategy,
+                smart_result,
+                workflow_results,
+            )
+            return
+
+    if status in (
+        RecoveryStatus.READY_FOR_RECOVERY,
+        RecoveryStatus.RECOVERING,
+    ):
+        if session.source_device is None:
+            log_error(
+                session,
+                "SENTINEL",
+                "Source device missing; cannot continue recovery workflow.",
+            )
+            print()
+            print(
+                "Source device is not connected. Connect the source device "
+                "and open the case again."
+            )
+            return
+
+        assessment = _require_assessment(
+            session,
+            assessment,
+            "Recovery workflow",
+        )
+        if assessment is None:
+            return
+
+        if status == RecoveryStatus.RECOVERING:
+            log_info(
+                session,
+                "SENTINEL",
+                "Interrupted recovery session; offering recovery operations.",
+            )
+
+        strategy = create_strategy(assessment)
+        (
+            workflow_results["recovery_result"],
+            workflow_results["recovery_declined"],
+            workflow_results["recovery_selection_cancelled"],
+        ) = _run_recovery_method_selection(
+            session,
+            assessment,
+            intake,
+        )
+        _finish_session(
+            session,
+            assessment,
+            strategy,
+            smart_result,
+            workflow_results,
+        )
+        return
+
+    log_error(
+        session,
+        "SENTINEL",
+        f"No route available for status {status}.",
+    )
+
+
+def _prompt_startup_menu():
+    print("[1] Create New Recovery Case")
+    print("[2] Open Existing Recovery Case")
+    print("[C] Cancel")
+    print()
+
+    while True:
+        choice = input("Select action [1-2 / C]: ").strip().lower()
+
+        if choice == "1":
+            return "new"
+        if choice == "2":
+            return "open"
+        if choice in ("c", "cancel"):
+            return "cancel"
+
+        print("Invalid selection.")
+
+
+def _prompt_case_selection(records):
+    print()
+    print("OPEN EXISTING RECOVERY CASE")
+    print("=" * 42)
+    print()
+
+    for index, record in enumerate(records, start=1):
+        print(f"[{index}] {record['session_id']}  {record['case_name']}")
+        print(f"    Status  : {record['status']}")
+        print(f"    Created : {record['created_at']}")
+        print(f"    Location: {record['recovery_path']}")
+        for warning in record.get("warnings", []):
+            print(f"    Warning : {warning}")
+        print()
+
+    print("[C] Cancel")
+    print()
+
+    while True:
+        choice = input(f"Select case [1-{len(records)} / C]: ").strip().lower()
+
+        if choice in ("c", "cancel"):
+            return None
+
+        try:
+            selection = int(choice)
+        except ValueError:
+            print("Invalid selection.")
+            continue
+
+        if 1 <= selection <= len(records):
+            return records[selection - 1]
+
+        print("Invalid selection.")
+
+
+def _run_new_case():
+    case_name = input("Case name: ").strip()
+
+    session = create_session()
+    intake = collect_case_intake()
+
+    session.case_name = case_name
+
+    if session.case_name == "":
+        session.case_name = session.session_id
+
+    write_initial_case_manifest(session)
+
+    log_info(
+        session,
+        "SENTINEL",
+        f"Case name set: {session.case_name}",
+    )
+
+    log_info(
+        session,
+        "INTAKE",
+        "Recovery case intake completed.",
+    )
+
+    log_info(
+        session,
+        "SENTINEL",
+        "Assessment started.",
+    )
+
+    devices = detect_devices()
+    device_count = len(devices)
+
+    if device_count == 1:
+        log_info(
+            session,
+            "ARGUS",
+            f"Detected 1 storage device: {devices[0].path}",
+        )
+    else:
+        log_info(
+            session,
+            "ARGUS",
+            f"Detected {device_count} storage devices.",
+        )
+
+    print(f"Recovery Case : {session.session_id}")
+    print(f"Case Name     : {session.case_name}")
+    print()
+
+    strategy, smart_result, workflow_results = _run_assessment_pipeline(
+        session,
+        intake,
+        devices,
+    )
+
+    _finish_session(
+        session,
+        session.assessment,
+        strategy,
+        smart_result,
+        workflow_results,
+    )
+
+
+def _run_open_case():
+    devices = detect_devices()
+    discovery = discover_cases(devices)
+
+    for warning in discovery["warnings"]:
+        print(f"Discovery warning: {warning}")
+
+    if not discovery["records"]:
+        print()
+        print("No recovery cases were found.")
+        return
+
+    selected = _prompt_case_selection(discovery["records"])
+    if selected is None:
+        print("Case selection cancelled.")
+        return
+
+    load_result = load_case(selected["recovery_path"], devices)
+
+    for warning in load_result["warnings"]:
+        print(f"Load warning: {warning}")
+
+    if not load_result["success"]:
+        print()
+        print(load_result["message"])
+        if load_result["session"] is not None:
+            session = load_result["session"]
+            message = load_result["message"]
+            if "Ambiguous" in message:
+                log_warning(
+                    session,
+                    "SENTINEL",
+                    "Ambiguous source device match.",
+                )
+            elif "not connected" in message or "missing" in message.lower():
+                log_error(
+                    session,
+                    "SENTINEL",
+                    "Source device missing.",
+                )
+            else:
+                log_error(
+                    session,
+                    "SENTINEL",
+                    f"Case load failed: {message}",
+                )
+        return
+
+    route_case(
+        load_result["session"],
+        load_result["intake"],
+        load_result["assessment"],
+        load_result["devices"],
+        load_result["warnings"],
+    )
+
+
+def main():
+    print("==========================================")
+    print("PROJECT SENTINEL")
+    print("==========================================")
+    print()
+
+    action = _prompt_startup_menu()
+
+    if action == "cancel":
+        print("Startup cancelled.")
+        return
+
+    if action == "new":
+        _run_new_case()
+        return
+
+    if action == "open":
+        _run_open_case()
+        return
+
+
+if __name__ == "__main__":
+    main()

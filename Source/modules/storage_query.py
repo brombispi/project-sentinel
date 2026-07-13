@@ -81,7 +81,7 @@ def query_lsblk_tree(device_path):
             "lsblk",
             "-J",
             "-o",
-            "NAME,PATH,TYPE,MOUNTPOINT,MOUNTPOINTS,FSTYPE,OPTIONS,PKNAME",
+            "NAME,PATH,TYPE,MOUNTPOINT,MOUNTPOINTS,FSTYPE,PKNAME",
             device_path,
         ],
         capture_output=True,
