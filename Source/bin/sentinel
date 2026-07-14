@@ -35,7 +35,13 @@ from modules.device_selection import (
     select_source_device,
     select_destination_device,
 )
-from modules.case_discovery import discover_cases, get_runtime_recoveries_root
+from modules.case_discovery import (
+    archive_case,
+    discover_cases,
+    get_runtime_recoveries_root,
+    is_archived_case_path,
+    reopen_case,
+)
 from modules.case_loader import load_case, resolve_resume_status
 from core.codex import Codex
 from core.status import RecoveryStatus
@@ -1049,6 +1055,45 @@ def route_case(session, intake, assessment, devices, warnings):
         f"Case opened: {session.session_id}",
     )
 
+    if is_archived_case_path(session.recovery_path, devices):
+        print()
+        print(f"Recovery Case : {session.session_id}")
+        print(f"Case Name     : {session.case_name}")
+        print(f"Case Location : {session.recovery_path}")
+        print()
+        print("This case is archived.")
+        reopen_confirm = input("Reopen it? [y/N]: ").strip().lower()
+
+        if reopen_confirm != "y":
+            log_operator(
+                session,
+                "SENTINEL",
+                "Archived case reopen declined.",
+            )
+            return
+
+        log_operator(
+            session,
+            "SENTINEL",
+            "Archived case reopen approved.",
+        )
+        reopen_result = reopen_case(session)
+        if not reopen_result["success"]:
+            log_error(
+                session,
+                "SENTINEL",
+                reopen_result["message"],
+            )
+            print()
+            print(reopen_result["message"])
+            return
+
+        log_info(
+            session,
+            "SENTINEL",
+            f"Case reopened: {reopen_result['message']}",
+        )
+
     if session.source_device:
         log_info(
             session,
@@ -1352,26 +1397,29 @@ def route_case(session, intake, assessment, devices, warnings):
 
 def _prompt_startup_menu():
     print("[1] Create New Recovery Case")
-    print("[2] Open Existing Recovery Case")
+    print("[2] Active Cases")
+    print("[3] Archived Cases")
     print("[C] Cancel")
     print()
 
     while True:
-        choice = input("Select action [1-2 / C]: ").strip().lower()
+        choice = input("Select action [1-3 / C]: ").strip().lower()
 
         if choice == "1":
             return "new"
         if choice == "2":
-            return "open"
+            return "active"
+        if choice == "3":
+            return "archived"
         if choice in ("c", "cancel"):
             return "cancel"
 
         print("Invalid selection.")
 
 
-def _prompt_case_selection(records):
+def _prompt_case_selection(records, *, title):
     print()
-    print("OPEN EXISTING RECOVERY CASE")
+    print(title)
     print("=" * 42)
     print()
 
@@ -1403,6 +1451,126 @@ def _prompt_case_selection(records):
             return records[selection - 1]
 
         print("Invalid selection.")
+
+
+def _prompt_active_case_action(record):
+    print()
+    print(f"Selected: {record['session_id']}  {record['case_name']}")
+    print()
+    print("[1] Open")
+    print("[2] Archive")
+    print("[C] Cancel")
+    print()
+
+    while True:
+        choice = input("Select action [1-2 / C]: ").strip().lower()
+
+        if choice == "1":
+            return "open"
+        if choice == "2":
+            return "archive"
+        if choice in ("c", "cancel"):
+            return "cancel"
+
+        print("Invalid selection.")
+
+
+def _open_selected_case(selected, devices):
+    load_result = load_case(selected["recovery_path"], devices)
+
+    for warning in load_result["warnings"]:
+        print(f"Load warning: {warning}")
+
+    if not load_result["success"]:
+        print()
+        print(load_result["message"])
+        if load_result["session"] is not None:
+            session = load_result["session"]
+            message = load_result["message"]
+            if "Ambiguous" in message:
+                log_warning(
+                    session,
+                    "SENTINEL",
+                    "Ambiguous source device match.",
+                )
+            elif "not connected" in message or "missing" in message.lower():
+                log_error(
+                    session,
+                    "SENTINEL",
+                    "Source device missing.",
+                )
+            else:
+                log_error(
+                    session,
+                    "SENTINEL",
+                    f"Case load failed: {message}",
+                )
+        return
+
+    route_case(
+        load_result["session"],
+        load_result["intake"],
+        load_result["assessment"],
+        load_result["devices"],
+        load_result["warnings"],
+    )
+
+
+def _archive_selected_case(selected, devices):
+    load_result = load_case(selected["recovery_path"], devices)
+
+    for warning in load_result["warnings"]:
+        print(f"Load warning: {warning}")
+
+    session = load_result["session"]
+    if session is None:
+        print()
+        print(load_result["message"])
+        return
+
+    print()
+    print(f"Recovery Case : {session.session_id}")
+    print(f"Case Name     : {session.case_name}")
+    print(f"Case Location : {session.recovery_path}")
+    print()
+
+    archive_confirm = input(
+        f"Archive case {session.session_id}? [y/N]: "
+    ).strip().lower()
+
+    if archive_confirm != "y":
+        log_operator(
+            session,
+            "SENTINEL",
+            "Case archive declined.",
+        )
+        print("Case archive cancelled.")
+        return
+
+    log_operator(
+        session,
+        "SENTINEL",
+        "Case archive approved.",
+    )
+
+    archive_result = archive_case(session)
+    if not archive_result["success"]:
+        log_error(
+            session,
+            "SENTINEL",
+            archive_result["message"],
+        )
+        print()
+        print(archive_result["message"])
+        return
+
+    log_info(
+        session,
+        "SENTINEL",
+        archive_result["message"],
+    )
+    print()
+    print(archive_result["message"])
 
 
 def _run_new_case():
@@ -1471,61 +1639,59 @@ def _run_new_case():
     )
 
 
-def _run_open_case():
+def _run_active_cases():
     devices = detect_devices()
-    discovery = discover_cases(devices)
+    discovery = discover_cases(devices, archived=False)
 
     for warning in discovery["warnings"]:
         print(f"Discovery warning: {warning}")
 
     if not discovery["records"]:
         print()
-        print("No recovery cases were found.")
+        print("No active recovery cases were found.")
         return
 
-    selected = _prompt_case_selection(discovery["records"])
+    selected = _prompt_case_selection(
+        discovery["records"],
+        title="ACTIVE CASES",
+    )
     if selected is None:
         print("Case selection cancelled.")
         return
 
-    load_result = load_case(selected["recovery_path"], devices)
-
-    for warning in load_result["warnings"]:
-        print(f"Load warning: {warning}")
-
-    if not load_result["success"]:
-        print()
-        print(load_result["message"])
-        if load_result["session"] is not None:
-            session = load_result["session"]
-            message = load_result["message"]
-            if "Ambiguous" in message:
-                log_warning(
-                    session,
-                    "SENTINEL",
-                    "Ambiguous source device match.",
-                )
-            elif "not connected" in message or "missing" in message.lower():
-                log_error(
-                    session,
-                    "SENTINEL",
-                    "Source device missing.",
-                )
-            else:
-                log_error(
-                    session,
-                    "SENTINEL",
-                    f"Case load failed: {message}",
-                )
+    action = _prompt_active_case_action(selected)
+    if action == "cancel":
+        print("Case action cancelled.")
         return
 
-    route_case(
-        load_result["session"],
-        load_result["intake"],
-        load_result["assessment"],
-        load_result["devices"],
-        load_result["warnings"],
+    if action == "archive":
+        _archive_selected_case(selected, devices)
+        return
+
+    _open_selected_case(selected, devices)
+
+
+def _run_archived_cases():
+    devices = detect_devices()
+    discovery = discover_cases(devices, archived=True)
+
+    for warning in discovery["warnings"]:
+        print(f"Discovery warning: {warning}")
+
+    if not discovery["records"]:
+        print()
+        print("No archived recovery cases were found.")
+        return
+
+    selected = _prompt_case_selection(
+        discovery["records"],
+        title="ARCHIVED CASES",
     )
+    if selected is None:
+        print("Case selection cancelled.")
+        return
+
+    _open_selected_case(selected, devices)
 
 
 def main():
@@ -1544,8 +1710,12 @@ def main():
         _run_new_case()
         return
 
-    if action == "open":
-        _run_open_case()
+    if action == "active":
+        _run_active_cases()
+        return
+
+    if action == "archived":
+        _run_archived_cases()
         return
 
 

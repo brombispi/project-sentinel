@@ -8,6 +8,7 @@ from core.session import RecoverySession
 from core.status import RecoveryStatus
 from modules.archive import classify_acquisition_state
 from modules.case_discovery import (
+    enumerate_all_permitted_roots,
     enumerate_permitted_roots,
     get_runtime_recoveries_root,
 )
@@ -313,6 +314,31 @@ def _status_requires_source_device(status):
     )
 
 
+def _is_recovery_engine_hold(manifest):
+    """
+    Identify ON_HOLD cases paused because the operator selected the
+    Recovery Engine as source.
+    """
+
+    if manifest.get("status") != RecoveryStatus.ON_HOLD:
+        return False
+
+    assessment_data = manifest.get("assessment")
+    if not assessment_data:
+        return False
+
+    if assessment_data.get("decision") != "STOP":
+        return False
+
+    device_data = manifest.get("device")
+    if device_data and device_data.get("role") == "RECOVERY ENGINE":
+        return True
+
+    return (
+        assessment_data.get("reason") == "Target is the Recovery Engine."
+    )
+
+
 def _artifact_status_warning(status, recovery_path):
     acquisition_state = classify_acquisition_state(recovery_path)
     artifact_state = acquisition_state["state"]
@@ -372,7 +398,7 @@ def load_case(recovery_path, devices):
     warnings = []
     permitted_roots = [
         root_info["path"]
-        for root_info in enumerate_permitted_roots(devices)
+        for root_info in enumerate_all_permitted_roots(devices)
     ]
 
     try:
@@ -430,7 +456,17 @@ def load_case(recovery_path, devices):
     intake = _reconstruct_intake(manifest)
 
     source_result = {"success": True, "device": None, "message": ""}
-    if _status_requires_source_device(status) or manifest.get("device"):
+    if _is_recovery_engine_hold(manifest):
+        source_result = {
+            "success": True,
+            "device": None,
+            "message": (
+                "Source re-identification skipped: case is ON_HOLD because "
+                "the Recovery Engine was selected as source."
+            ),
+        }
+        warnings.append(source_result["message"])
+    elif _status_requires_source_device(status) or manifest.get("device"):
         source_result = _reidentify_source_device(
             case_path,
             manifest,
