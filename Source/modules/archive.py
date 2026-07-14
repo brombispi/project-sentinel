@@ -5,7 +5,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from core.status import RecoveryStatus
-from modules.echo import log_info, log_error, log_warning
+from modules.echo import log_info, log_error, log_warning, log_operator
 from modules.manifest import write_initial_case_manifest
 from core.session import RecoverySession
 from services.session_registry import SessionRegistry
@@ -679,16 +679,36 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
             f"New forensic imaging started: {session.source_device.path}",
         )
 
-    completed = subprocess.run(
-        [
-            "ddrescue",
-            "-f",
-            "-n",
-            session.source_device.path,
-            str(image_path),
-            str(map_path),
-        ],
-    )
+    try:
+        completed = subprocess.run(
+            [
+                "ddrescue",
+                "-f",
+                "-n",
+                session.source_device.path,
+                str(image_path),
+                str(map_path),
+            ],
+        )
+    except KeyboardInterrupt:
+        artifacts = []
+
+        if image_path.is_file():
+            artifacts.append(str(image_path))
+
+        if map_path.is_file():
+            artifacts.append(str(map_path))
+
+        result["status"] = "interrupted"
+        result["interrupted"] = True
+        result["message"] = "Forensic imaging interrupted by operator."
+        result["artifacts"] = artifacts
+        log_operator(
+            session,
+            "ARCHIVE",
+            "Forensic imaging interrupted by operator.",
+        )
+        return result
 
     if completed.returncode == 0:
         result["success"] = True

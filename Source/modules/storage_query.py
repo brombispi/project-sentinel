@@ -308,14 +308,56 @@ def validate_ddrescue_map(map_path):
 
 
 _STATUS_CHAR_PATTERN = re.compile(r"^[?*/\-+]$")
+_HEX_ADDRESS_PATTERN = re.compile(r"^0x[0-9A-Fa-f]+$")
+
+
+def _is_status_character(value):
+    return bool(_STATUS_CHAR_PATTERN.match(value))
+
+
+def _is_hex_address(value):
+    return bool(_HEX_ADDRESS_PATTERN.match(value))
+
+
+def _is_pass_number(value):
+    return value.isdigit()
+
+
+def _parse_current_status_from_data_line(parts):
+    if len(parts) == 2:
+        if _is_hex_address(parts[0]) and _is_status_character(parts[1]):
+            return parts[1]
+        return None
+
+    if len(parts) == 3:
+        if (
+            _is_hex_address(parts[0])
+            and _is_status_character(parts[1])
+            and _is_pass_number(parts[2])
+        ):
+            return parts[1]
+
+        if (
+            _is_hex_address(parts[0])
+            and _is_hex_address(parts[1])
+            and _is_status_character(parts[2])
+        ):
+            return None
+
+        return None
+
+    return None
 
 
 def read_ddrescue_map_current_status(map_path):
     """
     Read current_status from the first GNU ddrescue mapfile data line.
 
-    The current-status line has two fields: current position and status.
-    Later three-field rows are block-status entries and are ignored here.
+    GNU ddrescue 1.27 documents the current-status line as three fields:
+    current position, current status, and current pass.
+
+    Block rows use three fields too: position, hexadecimal size, status.
+    Only the first data line is interpreted here.
 
     Returns the status character, or None when it cannot be interpreted.
     """
@@ -333,12 +375,7 @@ def read_ddrescue_map_current_status(map_path):
                 if not stripped or stripped.startswith("#"):
                     continue
 
-                parts = stripped.split()
-
-                if len(parts) == 2 and _STATUS_CHAR_PATTERN.match(parts[1]):
-                    return parts[1]
-
-                return None
+                return _parse_current_status_from_data_line(stripped.split())
     except OSError:
         return None
 
@@ -396,18 +433,18 @@ def _run_map_status_checks():
     incomplete_map = (
         "# Mapfile. Created by GNU ddrescue\n"
         "# current_pos  current_status  current_pass\n"
-        "0x00000000     ?\n"
-        "0x00000000  0x00100000  ?\n"
+        "0x00000000  ?  1\n"
+        "0x00000000  0x3A9800000  ?\n"
     )
     finished_map = (
         "# Mapfile. Created by GNU ddrescue\n"
         "# current_pos  current_status  current_pass\n"
-        "0x01000000     +\n"
-        "0x00000000  0x01000000  +\n"
+        "0x00000000  +  1\n"
+        "0x00000000  0x3A9800000  +\n"
     )
     block_only_map = (
         "# Mapfile. Created by GNU ddrescue\n"
-        "0x00000000  0x00100000  ?\n"
+        "0x00000000  0x3A9800000  ?\n"
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -421,7 +458,7 @@ def _run_map_status_checks():
 
         checks = [
             (
-                "incomplete current-status line",
+                "GNU ddrescue 1.27 current-status line",
                 read_ddrescue_map_current_status(incomplete_path),
                 "?",
             ),

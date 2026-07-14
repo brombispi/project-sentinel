@@ -7,7 +7,10 @@ from core.decision import Decision
 from core.session import RecoverySession
 from core.status import RecoveryStatus
 from modules.archive import classify_acquisition_state
-from modules.case_discovery import enumerate_permitted_roots
+from modules.case_discovery import (
+    enumerate_permitted_roots,
+    get_runtime_recoveries_root,
+)
 from modules.manifest import ManifestError, read_case_manifest
 from modules.storage_query import get_block_device_size_bytes
 
@@ -24,6 +27,46 @@ def _normalize_identity_text(value):
 def _serial_is_trustworthy(serial):
     normalized = _normalize_identity_text(serial)
     return normalized not in TRUSTWORTHY_SERIAL_ABSENT
+
+
+def _path_under_root(path, root):
+    path = Path(path).resolve()
+    root = Path(root).resolve()
+
+    try:
+        return path.is_relative_to(root)
+    except AttributeError:
+        return str(path).startswith(str(root))
+
+
+def _is_on_recovery_storage(case_path, devices):
+    case_path = Path(case_path).resolve()
+    local_root = get_runtime_recoveries_root().resolve()
+
+    if _path_under_root(case_path, local_root):
+        return False
+
+    for root_info in enumerate_permitted_roots(devices):
+        if root_info["is_local"]:
+            continue
+
+        if _path_under_root(case_path, root_info["path"]):
+            return True
+
+    return False
+
+
+def _destination_reidentify_failure_blocks_open(status, case_path, devices):
+    if _is_on_recovery_storage(case_path, devices):
+        return False
+
+    if status in (
+        RecoveryStatus.READY_FOR_RECOVERY,
+        RecoveryStatus.RECOVERING,
+    ):
+        return False
+
+    return True
 
 
 def _load_acquisition_source(recovery_path):
@@ -412,12 +455,14 @@ def load_case(recovery_path, devices):
         devices,
         warnings,
     )
-    if not destination_result["success"] and manifest.get("destination"):
-        if status in (
-            RecoveryStatus.READY_FOR_IMAGING,
-            RecoveryStatus.IMAGING,
-            RecoveryStatus.READY_FOR_RECOVERY,
-            RecoveryStatus.RECOVERING,
+    if destination_result["success"]:
+        session.destination_device = destination_result["device"]
+    elif manifest.get("destination"):
+        warnings.append(destination_result["message"])
+        if _destination_reidentify_failure_blocks_open(
+            status,
+            case_path,
+            devices,
         ):
             return {
                 "success": False,
@@ -431,9 +476,6 @@ def load_case(recovery_path, devices):
                 "warnings": warnings,
                 "message": destination_result["message"],
             }
-        warnings.append(destination_result["message"])
-    else:
-        session.destination_device = destination_result["device"]
 
     assessment = _reconstruct_assessment(manifest, session.source_device)
     session.assessment = assessment
