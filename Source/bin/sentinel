@@ -53,8 +53,14 @@ from modules.case_loader import (
     resolve_resume_status,
 )
 from i18n import (
+    display_aegis_reason,
+    display_janus_reason,
+    display_oracle_goal,
+    display_oracle_step,
+    display_smart_warning,
     get_language,
     init_language,
+    operator_message,
     set_language,
     tr,
 )
@@ -153,14 +159,20 @@ def _prompt_language_selection():
 
 
 def _print_mounted_descendants(mounted_descendants):
-    print("Mounted descendants:")
+    print(tr("mount.descendants.title"))
     for item in mounted_descendants:
         options = item.get("options") or "unknown"
         filesystem = item.get("filesystem") or "unknown"
         node_type = item.get("type") or "unknown"
         print(
-            f"- {item['device_path']} -> {item['mount_target']} "
-            f"({node_type}, {filesystem}, {options})"
+            tr(
+                "mount.descendants.line",
+                device_path=item["device_path"],
+                mount_target=item["mount_target"],
+                node_type=node_type,
+                filesystem=filesystem,
+                options=options,
+            )
         )
 
 
@@ -181,14 +193,9 @@ def _run_mount_safety_gate(session, devices):
     print()
     _print_mounted_descendants(mounted_descendants)
     print()
-    print(
-        "Mounted filesystems on the source disk may be modified by the "
-        "operating system during imaging."
-    )
+    print(tr("mount.warning.os_modify"))
 
-    unmount_confirm = input(
-        "Should Sentinel unmount these filesystems before imaging? [y/N]: "
-    ).strip().lower()
+    unmount_confirm = input(tr("mount.prompt.unmount")).strip().lower()
 
     if unmount_confirm != "y":
         log_operator(
@@ -197,8 +204,8 @@ def _run_mount_safety_gate(session, devices):
             "Unmount of mounted descendants declined.",
         )
         print()
-        print("IMAGING REFUSED")
-        print("Mounted descendants remain on the source disk.")
+        print(tr("mount.refused.title"))
+        print(tr("mount.refused.descendants_remain"))
         return False, exclude_mount_targets
 
     log_operator(
@@ -225,30 +232,82 @@ def _run_mount_safety_gate(session, devices):
 
     if mounted_descendants:
         print()
-        print("IMAGING REFUSED")
-        print(unmount_result["message"])
+        print(tr("mount.refused.title"))
+        print(operator_message(unmount_result, "archive"))
         _print_mounted_descendants(mounted_descendants)
         return False, exclude_mount_targets
 
     return True, exclude_mount_targets
 
 
+def _identity_field(value):
+    if value is None or value == "":
+        return tr("identity.missing")
+    return value
+
+
+def _operator_oracle_goal(goal):
+    displayed = display_oracle_goal(goal)
+    if displayed == goal:
+        translated = tr(goal)
+        if not translated.startswith("["):
+            return translated
+    return displayed
+
+
+def _operator_oracle_step(step, recommendation=None):
+    displayed = display_oracle_step(step, recommendation=recommendation)
+    if displayed == step:
+        translated = tr(step)
+        if not translated.startswith("["):
+            return translated
+    return displayed
+
+
 def _print_identity_comparison(identity_result):
     recorded = identity_result["recorded"] or {}
     current = identity_result["current"]
 
-    print("Acquisition identity comparison:")
-    print(f"Recorded serial     : {recorded.get('serial', 'missing')}")
-    print(f"Current serial      : {current.get('serial', 'missing')}")
-    print(f"Recorded model      : {recorded.get('model', 'missing')}")
-    print(f"Current model       : {current.get('model', 'missing')}")
-    print(f"Recorded size_bytes : {recorded.get('size_bytes', 'missing')}")
-    print(f"Current size_bytes  : {current.get('size_bytes', 'missing')}")
-    print(f"Recorded path       : {recorded.get('path', 'missing')}")
-    print(f"Current path        : {current.get('path', 'missing')}")
+    print(tr("identity.title"))
+    print(
+        tr("identity.label.recorded_serial"),
+        _identity_field(recorded.get("serial")),
+    )
+    print(
+        tr("identity.label.current_serial"),
+        _identity_field(current.get("serial")),
+    )
+    print(
+        tr("identity.label.recorded_model"),
+        _identity_field(recorded.get("model")),
+    )
+    print(
+        tr("identity.label.current_model"),
+        _identity_field(current.get("model")),
+    )
+    print(
+        tr("identity.label.recorded_size_bytes"),
+        _identity_field(recorded.get("size_bytes")),
+    )
+    print(
+        tr("identity.label.current_size_bytes"),
+        _identity_field(current.get("size_bytes")),
+    )
+    print(
+        tr("identity.label.recorded_path"),
+        _identity_field(recorded.get("path")),
+    )
+    print(
+        tr("identity.label.current_path"),
+        _identity_field(current.get("path")),
+    )
 
     for warning in identity_result.get("warnings", []):
-        print(f"Warning             : {warning}")
+        if isinstance(warning, dict):
+            warning_text = operator_message(warning, "archive")
+        else:
+            warning_text = warning
+        print(tr("identity.label.warning"), warning_text)
 
 
 def _run_recovery_method_selection(session, assessment, intake):
@@ -264,35 +323,37 @@ def _run_recovery_method_selection(session, assessment, intake):
 
     print()
     print("=" * 42)
-    print("RECOVERY METHOD")
+    print(tr("recovery.method.title"))
     print("=" * 42)
     print()
-    print(
-        "Recommended : "
-        f"{'PhotoRec' if recommendation['recommended_operation'] == 'photorec' else recommendation['recommended_operation']}"
+    recommended_operation = (
+        "PhotoRec"
+        if recommendation["recommended_operation"] == "photorec"
+        else recommendation["recommended_operation"]
     )
-    print(f"Confidence  : {recommendation['confidence']}")
-    print(f"Reason      : {recommendation['reason']}")
+    print(tr("recovery.label.recommended"), recommended_operation)
+    print(tr("recovery.label.confidence"), recommendation["confidence"])
+    print(tr("recovery.label.reason"), tr(recommendation["reason"]))
     print()
-    print("Available Operations")
+    print(tr("recovery.label.available_operations"))
     print()
-    print("[1] PhotoRec")
-    print("    Signature carving")
+    print(tr("recovery.option.photorec"))
+    print(tr("recovery.option.desc"))
     print()
-    print("[2] Cancel")
+    print(tr("recovery.option.cancel"))
     print()
-    print("Note: TestDisk is not yet integrated.")
+    print(tr("recovery.note.testdisk"))
     print()
 
     recovery_method_choice = None
     while recovery_method_choice is None:
-        choice = input("Select operation [1-2]: ").strip()
+        choice = input(tr("recovery.prompt.select")).strip()
         if choice == "1":
             recovery_method_choice = "photorec"
         elif choice == "2":
             recovery_method_choice = "cancel"
         else:
-            print("Invalid selection.")
+            print(tr("validation.invalid_selection"))
 
     if recovery_method_choice == "photorec":
         log_operator(
@@ -315,55 +376,47 @@ def _run_recovery_method_selection(session, assessment, intake):
 
         print()
         print("=" * 42)
-        print("PHOTOREC GUIDANCE")
+        print(tr("photorec.guidance.title"))
         print("=" * 42)
         print()
 
         if detected_ext:
             print(
-                "Filesystem type : Choose "
-                f"{detected_ext[0]} when PhotoRec asks "
-                "for the filesystem."
+                tr(
+                    "photorec.filesystem.ext",
+                    filesystem=detected_ext[0],
+                )
             )
         else:
-            print(
-                "Filesystem type : Choose Other when PhotoRec "
-                "asks for the filesystem."
+            print(tr("photorec.filesystem.other"))
+
+        print()
+        print(tr("photorec.scan.title"))
+        print()
+        print(tr("photorec.scan.free"))
+        print()
+        print(tr("photorec.scan.whole"))
+        print()
+        print(tr("photorec.select_mode"))
+        print()
+
+        print()
+        print(tr("photorec.recovery.title"))
+        print(tr("photorec.recovery.operation"))
+        print(
+            tr(
+                "photorec.recovery.source_image",
+                image_path=f"{session.recovery_path}/images/source.img",
             )
-
-        print()
-        print("Scan mode options:")
-        print()
-        print(
-            "Free  : Scan unallocated space for deleted files "
-            "when filesystem metadata is usable."
-        )
-        print()
-        print(
-            "Whole : Scan the full partition when damaged, "
-            "reformatted, or uncertain."
-        )
-        print()
-        print(
-            "Select Free or Whole inside PhotoRec based on "
-            "the case."
-        )
-        print()
-
-        print("\nRECOVERY")
-        print("Operation  : Recover files with PhotoRec")
-        print(
-            f"Source image     : "
-            f"{session.recovery_path}/images/source.img"
         )
         print(
-            f"Recovery output  : "
-            f"{session.recovery_path}/recovered/"
+            tr(
+                "photorec.recovery.output",
+                output_path=f"{session.recovery_path}/recovered/",
+            )
         )
 
-        recovery_confirm = input(
-            "Proceed with PhotoRec recovery? [y/N]: "
-        ).strip().lower()
+        recovery_confirm = input(tr("photorec.prompt.proceed")).strip().lower()
 
         if recovery_confirm == "y":
             update_status(
@@ -385,27 +438,27 @@ def _run_recovery_method_selection(session, assessment, intake):
             )
 
             photorec_session = (
-                "Ended normally"
+                tr("recovery.result.ended_normally")
                 if recovery_result["success"]
-                else "Failed"
+                else tr("recovery.result.failed")
             )
 
             print()
-            print("RECOVERY RESULT")
-            print(f"PhotoRec session      : {photorec_session}")
+            print(tr("recovery.result.title"))
+            print(tr("recovery.result.photorec_session"), photorec_session)
             print(
-                "Recovered directories : "
-                f"{recovery_result['recovered_directory_count']}"
+                tr("recovery.result.recovered_directories"),
+                recovery_result["recovered_directory_count"],
             )
             print(
-                "Recovered files       : "
-                f"{recovery_result['recovered_file_count']}"
+                tr("recovery.result.recovered_files"),
+                recovery_result["recovered_file_count"],
             )
             print(
-                "Recovered size        : "
-                f"{format_bytes(recovery_result['recovered_total_bytes'])}"
+                tr("recovery.result.recovered_size"),
+                format_bytes(recovery_result["recovered_total_bytes"]),
             )
-            print(f"Case status           : {session.status}")
+            print(tr("recovery.result.case_status"), session.status)
             return recovery_result, False, False
 
         log_operator(
@@ -424,49 +477,55 @@ def _run_recovery_method_selection(session, assessment, intake):
 
 
 def _print_assessment_context(source_device, assessment, strategy):
-    print(f"Device     : {source_device.path}")
-    print(f"Model      : {source_device.model}")
-    print(f"Serial     : {source_device.serial}")
-    print(f"Filesystem : {source_device.filesystem}")
-    print(f"Role       : {source_device.role}")
+    print(tr("assessment.label.device"), source_device.path)
+    print(tr("assessment.label.model"), source_device.model)
+    print(tr("assessment.label.serial"), source_device.serial)
+    print(tr("assessment.label.filesystem"), source_device.filesystem)
+    print(tr("assessment.label.role"), source_device.role)
     print()
 
     codex = Codex()
 
-    print("CODEX")
+    print(tr("assessment.section.codex"))
 
     for filesystem in source_device.filesystem.split(","):
         key = filesystem.strip().lower()
         knowledge = codex.lookup("filesystem", key)
 
         if knowledge:
-            print(f"Filesystem : {key}")
+            print(tr("codex.label.filesystem"), key)
 
             if "warning" in knowledge:
-                print(f"Warning    : {knowledge['warning']}")
+                print(tr("codex.label.warning"), tr(knowledge["warning"]))
 
             if "risk" in knowledge:
-                print(f"Risk       : {knowledge['risk']}")
+                print(tr("codex.label.risk"), tr(knowledge["risk"]))
 
             if "recommended_action" in knowledge:
-                print(f"Action     : {knowledge['recommended_action']}")
+                print(
+                    tr("codex.label.action"),
+                    tr(knowledge["recommended_action"]),
+                )
 
             print()
 
-    print("AEGIS")
-    print(f"Decision   : {assessment.decision.status}")
-    print(f"Reason     : {assessment.decision.reason}")
+    print(tr("assessment.section.aegis"))
+    print(tr("aegis.label.decision"), assessment.decision.status)
+    print(
+        tr("aegis.label.reason"),
+        display_aegis_reason(assessment.decision.reason),
+    )
 
     print()
-    print("ORACLE")
-    print(f"Goal       : {strategy.goal}")
-    print(f"Priority   : {strategy.priority}")
+    print(tr("assessment.section.oracle"))
+    print(tr("oracle.label.goal"), _operator_oracle_goal(strategy.goal))
+    print(tr("oracle.label.priority"), strategy.priority)
 
     print()
-    print("Strategy")
+    print(tr("oracle.label.strategy"))
 
     for step in strategy.steps:
-        print(f"- {step}")
+        print(f"- {_operator_oracle_step(step)}")
 
 
 def _run_acquisition_workflow(session, devices, assessment, intake):
@@ -486,12 +545,9 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
 
     if acquisition_state["state"] == "completed_canonical":
         print()
-        print("IMAGING REFUSED")
-        print(acquisition_state["message"])
-        print(
-            "The canonical forensic image and SHA-256 fingerprint are "
-            "already preserved."
-        )
+        print(tr("imaging.refused.title"))
+        print(operator_message(acquisition_state, "archive"))
+        print(tr("imaging.refused.canonical_preserved"))
         log_info(
             session,
             "SENTINEL",
@@ -507,11 +563,9 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
 
     elif acquisition_state["state"] == "inconsistent_artifacts":
         print()
-        print("IMAGING REFUSED")
-        print(acquisition_state["message"])
-        print(
-            "Manual investigation is required before any imaging action."
-        )
+        print(tr("imaging.refused.title"))
+        print(operator_message(acquisition_state, "archive"))
+        print(tr("imaging.refused.manual_investigation"))
         log_error(
             session,
             "SENTINEL",
@@ -527,12 +581,9 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
 
     elif acquisition_state["state"] == "invalid_map":
         print()
-        print("IMAGING REFUSED")
-        print(acquisition_state["message"])
-        print(
-            "Sentinel will not resume, overwrite, or delete the "
-            "existing artifacts."
-        )
+        print(tr("imaging.refused.title"))
+        print(operator_message(acquisition_state, "archive"))
+        print(tr("imaging.refused.no_overwrite"))
         log_error(
             session,
             "SENTINEL",
@@ -550,15 +601,9 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
         "imaging_complete_fingerprint_missing"
     ):
         print()
-        print("FINGERPRINT RETRY")
-        print(
-            "Imaging is complete. SHA-256 fingerprint has not been "
-            "recorded."
-        )
-        print(
-            "Sentinel will record the fingerprint now. ddrescue will "
-            "not run again."
-        )
+        print(tr("imaging.fingerprint.title"))
+        print(tr("imaging.fingerprint.missing"))
+        print(tr("imaging.fingerprint.no_rerun"))
         log_info(
             session,
             "SENTINEL",
@@ -566,7 +611,7 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
         )
 
         fingerprint_confirm = input(
-            "Proceed with fingerprinting? [y/N]: "
+            tr("imaging.prompt.fingerprint")
         ).strip().lower()
 
         if fingerprint_confirm == "y":
@@ -578,14 +623,14 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
             integrity_result = verify_forensic_image(session)
 
             print()
-            print("INTEGRITY")
-            print(f"Image      : {integrity_result['image_filename']}")
-            print(f"Algorithm  : {integrity_result['algorithm']}")
+            print(tr("integrity.title"))
+            print(tr("integrity.label.image"), integrity_result["image_filename"])
+            print(tr("integrity.label.algorithm"), integrity_result["algorithm"])
 
             if integrity_result["success"]:
-                print("Result     : Hash recorded")
-                print(f"SHA-256    : {integrity_result['digest']}")
-                print(f"Saved to   : {integrity_result['evidence_path']}")
+                print(tr("integrity.label.result"), tr("integrity.result.recorded"))
+                print(tr("integrity.label.sha256"), integrity_result["digest"])
+                print(tr("integrity.label.saved_to"), integrity_result["evidence_path"])
 
                 update_status(
                     session,
@@ -605,8 +650,11 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                     intake,
                 )
             else:
-                print("Result     : Failed")
-                print(f"Error      : {integrity_result['message']}")
+                print(tr("integrity.label.result"), tr("integrity.result.failed"))
+                print(
+                    tr("integrity.label.error"),
+                    operator_message(integrity_result, "archive"),
+                )
                 update_status(
                     session,
                     RecoveryStatus.READY_FOR_IMAGING,
@@ -637,20 +685,22 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
             identity_result = validate_source_identity_for_resume(session)
 
             print()
-            print("RESUME FORENSIC IMAGING")
+            print(tr("imaging.resume.title"))
             print(
-                f"Image      : {session.recovery_path}/images/source.img"
+                tr("imaging.label.image"),
+                f"{session.recovery_path}/images/source.img",
             )
             print(
-                f"Map        : {session.recovery_path}/images/source.map"
+                tr("imaging.label.map"),
+                f"{session.recovery_path}/images/source.map",
             )
             print()
             _print_identity_comparison(identity_result)
             print()
 
             if not identity_result["valid"]:
-                print("IMAGING REFUSED")
-                print(identity_result["message"])
+                print(tr("imaging.refused.title"))
+                print(operator_message(identity_result, "archive"))
                 log_error(
                     session,
                     "SENTINEL",
@@ -677,14 +727,9 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                         intake=intake,
                     )
                 else:
-                    print(
-                        "ddrescue will continue using the existing "
-                        "source.img and source.map."
-                    )
+                    print(tr("imaging.ddrescue.continue"))
 
-                    confirm = input(
-                        "Proceed with forensic imaging resume? [y/N]: "
-                    ).strip().lower()
+                    confirm = input(tr("imaging.prompt.resume")).strip().lower()
 
                     if confirm == "y":
                         update_status(
@@ -702,12 +747,15 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                         )
 
                         print()
-                        print("ARCHIVE")
-                        print(f"Status     : {imaging_result['status']}")
-                        print(f"Result     : {imaging_result['message']}")
+                        print(tr("archive.title"))
+                        print(tr("archive.label.status"), imaging_result["status"])
+                        print(
+                            tr("archive.label.result"),
+                            operator_message(imaging_result, "archive"),
+                        )
 
                         if imaging_result["artifacts"]:
-                            print("Artifacts  :")
+                            print(tr("archive.label.artifacts"))
                             for artifact in imaging_result["artifacts"]:
                                 print(f"- {artifact}")
 
@@ -717,31 +765,40 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                             )
 
                             print()
-                            print("INTEGRITY")
+                            print(tr("integrity.title"))
                             print(
-                                f"Image      : "
-                                f"{integrity_result['image_filename']}"
+                                tr("integrity.label.image"),
+                                integrity_result["image_filename"],
                             )
                             print(
-                                f"Algorithm  : "
-                                f"{integrity_result['algorithm']}"
+                                tr("integrity.label.algorithm"),
+                                integrity_result["algorithm"],
                             )
 
                             if integrity_result["success"]:
-                                print("Result     : Hash recorded")
                                 print(
-                                    f"SHA-256    : "
-                                    f"{integrity_result['digest']}"
+                                    tr("integrity.label.result"),
+                                    tr("integrity.result.recorded"),
                                 )
                                 print(
-                                    f"Saved to   : "
-                                    f"{integrity_result['evidence_path']}"
+                                    tr("integrity.label.sha256"),
+                                    integrity_result["digest"],
+                                )
+                                print(
+                                    tr("integrity.label.saved_to"),
+                                    integrity_result["evidence_path"],
                                 )
                             else:
-                                print("Result     : Failed")
                                 print(
-                                    f"Error      : "
-                                    f"{integrity_result['message']}"
+                                    tr("integrity.label.result"),
+                                    tr("integrity.result.failed"),
+                                )
+                                print(
+                                    tr("integrity.label.error"),
+                                    operator_message(
+                                        integrity_result,
+                                        "archive",
+                                    ),
                                 )
 
                             if integrity_result["success"]:
@@ -806,19 +863,22 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                 )
             else:
                 print()
-                print("NEW FORENSIC IMAGING")
-                print("Operation  : Create forensic image")
-                print(f"Source     : {session.source_device.path}")
+                print(tr("imaging.new.title"))
                 print(
-                    f"Output     : {session.recovery_path}/images/source.img"
+                    tr("imaging.label.operation"),
+                    tr("oracle.step.create_forensic_image").rstrip("."),
+                )
+                print(tr("imaging.label.source"), session.source_device.path)
+                print(
+                    tr("imaging.label.output"),
+                    f"{session.recovery_path}/images/source.img",
                 )
                 print(
-                    f"Map        : {session.recovery_path}/images/source.map"
+                    tr("imaging.label.map"),
+                    f"{session.recovery_path}/images/source.map",
                 )
 
-                confirm = input(
-                    "Proceed with forensic imaging? [y/N]: "
-                ).strip().lower()
+                confirm = input(tr("imaging.prompt.new")).strip().lower()
 
                 if confirm == "y":
                     update_status(
@@ -836,12 +896,15 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                     )
 
                     print()
-                    print("ARCHIVE")
-                    print(f"Status     : {imaging_result['status']}")
-                    print(f"Result     : {imaging_result['message']}")
+                    print(tr("archive.title"))
+                    print(tr("archive.label.status"), imaging_result["status"])
+                    print(
+                        tr("archive.label.result"),
+                        operator_message(imaging_result, "archive"),
+                    )
 
                     if imaging_result["artifacts"]:
-                        print("Artifacts  :")
+                        print(tr("archive.label.artifacts"))
                         for artifact in imaging_result["artifacts"]:
                             print(f"- {artifact}")
 
@@ -849,31 +912,37 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                         integrity_result = verify_forensic_image(session)
 
                         print()
-                        print("INTEGRITY")
+                        print(tr("integrity.title"))
                         print(
-                            f"Image      : "
-                            f"{integrity_result['image_filename']}"
+                            tr("integrity.label.image"),
+                            integrity_result["image_filename"],
                         )
                         print(
-                            f"Algorithm  : "
-                            f"{integrity_result['algorithm']}"
+                            tr("integrity.label.algorithm"),
+                            integrity_result["algorithm"],
                         )
 
                         if integrity_result["success"]:
-                            print("Result     : Hash recorded")
                             print(
-                                f"SHA-256    : "
-                                f"{integrity_result['digest']}"
+                                tr("integrity.label.result"),
+                                tr("integrity.result.recorded"),
                             )
                             print(
-                                f"Saved to   : "
-                                f"{integrity_result['evidence_path']}"
+                                tr("integrity.label.sha256"),
+                                integrity_result["digest"],
+                            )
+                            print(
+                                tr("integrity.label.saved_to"),
+                                integrity_result["evidence_path"],
                             )
                         else:
-                            print("Result     : Failed")
                             print(
-                                f"Error      : "
-                                f"{integrity_result['message']}"
+                                tr("integrity.label.result"),
+                                tr("integrity.result.failed"),
+                            )
+                            print(
+                                tr("integrity.label.error"),
+                                operator_message(integrity_result, "archive"),
                             )
 
                         if integrity_result["success"]:
@@ -1013,13 +1082,21 @@ def _run_assessment_pipeline(session, intake, devices):
     )
 
     print()
-    print("SMART")
-    print(f"Available  : {'YES' if smart_result['available'] else 'NO'}")
-    print(f"Health     : {smart_result['health']}")
-    print(f"Saved to   : {smart_result['output_path']}")
+    print(tr("assessment.section.smart"))
+    print(
+        tr("smart.label.available"),
+        tr("smart.available_yes")
+        if smart_result["available"]
+        else tr("smart.available_no"),
+    )
+    print(tr("smart.label.health"), smart_result["health"])
+    print(tr("smart.label.saved_to"), smart_result["output_path"])
 
     if smart_result["warning"]:
-        print(f"Warning    : {smart_result['warning']}")
+        print(
+            tr("smart.label.warning"),
+            display_smart_warning(smart_result["warning"]),
+        )
 
     if smart_result["available"]:
         log_info(
@@ -1052,10 +1129,23 @@ def _run_assessment_pipeline(session, intake, devices):
     destination_assessment = evaluate_destination(session.destination_device)
 
     print()
-    print("JANUS")
-    print(f"Approved  : {'YES' if destination_assessment.approved else 'NO'}")
-    print(f"Reason    : {destination_assessment.reason}")
-    print(f"Risk      : {destination_assessment.risk}")
+    print(tr("assessment.section.janus"))
+    print(
+        tr("janus.label.approved"),
+        tr("janus.approved_yes")
+        if destination_assessment.approved
+        else tr("janus.approved_no"),
+    )
+    print(
+        tr("janus.label.reason"),
+        display_janus_reason(
+            destination_assessment,
+            session.destination_device.mount_point
+            if session.destination_device
+            else None,
+        ),
+    )
+    print(tr("janus.label.risk"), destination_assessment.risk)
 
     case_relocated = False
     recovery_path = Path(session.recovery_path).resolve()
@@ -1070,9 +1160,12 @@ def _run_assessment_pipeline(session, intake, devices):
         )
 
         print()
-        print("ARCHIVE")
-        print(f"Status     : {relocate_result['status']}")
-        print(f"Result     : {relocate_result['message']}")
+        print(tr("archive.title"))
+        print(tr("archive.label.status"), relocate_result["status"])
+        print(
+            tr("archive.label.result"),
+            operator_message(relocate_result, "archive"),
+        )
 
         case_relocated = relocate_result["success"]
     elif destination_assessment.approved:
@@ -1144,8 +1237,10 @@ def _require_assessment(session, assessment, workflow_name):
     )
     print()
     print(
-        f"Cannot continue {workflow_name.lower()}: persisted assessment "
-        "is missing from case.json."
+        tr(
+            "error.assessment_missing",
+            workflow_name=workflow_name.lower(),
+        )
     )
     return None
 
@@ -1208,11 +1303,9 @@ def route_case(
     ):
         if not archive_reopened:
             print()
-            print(f"Case status: {status}")
-            print("Recovery work was previously finalized for this case.")
-            reopen_confirm = input(
-                "Reopen case for additional work? [y/N]: "
-            ).strip().lower()
+            print(tr("route.label.case_status"), status)
+            print(tr("route.status.finalized"))
+            reopen_confirm = input(tr("route.prompt.reopen")).strip().lower()
 
             if reopen_confirm != "y":
                 log_operator(
@@ -1244,9 +1337,7 @@ def route_case(
                 "Case reopen refused: source device is not connected.",
             )
             print()
-            print(
-                "Cannot reopen case: source device is not connected."
-            )
+            print(tr("error.source_missing"))
             return
 
         update_status(
@@ -1267,9 +1358,9 @@ def route_case(
         RecoveryStatus.AWAITING_CUSTOMER_RESPONSE,
     ):
         print()
-        print(f"Case status: {status}")
-        print("Work is paused for this case.")
-        resume_confirm = input("Resume work? [y/N]: ").strip().lower()
+        print(tr("route.label.case_status"), status)
+        print(tr("route.status.paused"))
+        resume_confirm = input(tr("route.prompt.resume")).strip().lower()
 
         if resume_confirm != "y":
             log_operator(
@@ -1300,9 +1391,9 @@ def route_case(
             f"State routing decision: resumed to {status}",
         )
 
-    print(f"Recovery Case : {session.session_id}")
-    print(f"Case Name     : {session.case_name}")
-    print(f"Case Location : {session.recovery_path}")
+    print(tr("route.label.recovery_case"), session.session_id)
+    print(tr("route.label.case_name"), session.case_name)
+    print(tr("route.label.case_location"), session.recovery_path)
     print()
 
     if status == RecoveryStatus.NEW:
@@ -1363,10 +1454,7 @@ def route_case(
                 "Source device missing; cannot continue imaging workflow.",
             )
             print()
-            print(
-                "Source device is not connected. Connect the source device "
-                "and open the case again."
-            )
+            print(tr("error.source_missing"))
             return
 
         assessment = _require_assessment(
@@ -1424,10 +1512,7 @@ def route_case(
                 "Source device missing; cannot continue recovery workflow.",
             )
             print()
-            print(
-                "Source device is not connected. Connect the source device "
-                "and open the case again."
-            )
+            print(tr("error.source_missing"))
             return
 
         assessment = _require_assessment(
@@ -1599,7 +1684,7 @@ def _open_selected_case(selected, devices):
 
     if not load_result["success"]:
         print()
-        print(load_result["message"])
+        print(operator_message(load_result, "load"))
         if load_result["session"] is not None:
             _log_case_load_failure(load_result["session"], load_result)
         return
@@ -1648,7 +1733,10 @@ def _open_archived_case(selected, devices):
     except ValueError:
         print()
         print(
-            f"case.json created_at is invalid: {manifest['created_at']}"
+            tr(
+                "load.message.invalid_created_at",
+                created_at=manifest["created_at"],
+            )
         )
         return
 
@@ -1674,7 +1762,7 @@ def _open_archived_case(selected, devices):
             reopen_result["message"],
         )
         print()
-        print(reopen_result["message"])
+        print(operator_message(reopen_result, "discovery"))
         return
 
     log_info(
@@ -1692,7 +1780,7 @@ def _open_archived_case(selected, devices):
 
     if not load_result["success"]:
         print()
-        print(load_result["message"])
+        print(operator_message(load_result, "load"))
         if load_result["session"] is not None:
             _log_case_load_failure(load_result["session"], load_result)
         return
@@ -1716,7 +1804,7 @@ def _archive_selected_case(selected, devices):
     session = load_result["session"]
     if session is None:
         print()
-        print(load_result["message"])
+        print(operator_message(load_result, "load"))
         return
 
     print()
@@ -1752,7 +1840,7 @@ def _archive_selected_case(selected, devices):
             archive_result["message"],
         )
         print()
-        print(archive_result["message"])
+        print(operator_message(archive_result, "discovery"))
         return
 
     log_info(
@@ -1761,7 +1849,7 @@ def _archive_selected_case(selected, devices):
         archive_result["message"],
     )
     print()
-    print(archive_result["message"])
+    print(operator_message(archive_result, "discovery"))
 
 
 def _run_new_case():

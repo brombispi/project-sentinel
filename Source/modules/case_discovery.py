@@ -169,30 +169,40 @@ def archive_case(session):
     dest_path = archive_root / session.session_id
 
     if not case_path.is_dir():
+        result["code"] = "CASE_NOT_FOUND"
         result["message"] = f"Recovery case folder not found: {case_path}"
+        result["display_args"] = {"case_path": str(case_path)}
         return result
 
     if dest_path.exists():
+        result["code"] = "ARCHIVE_EXISTS"
         result["message"] = (
             f"Archive destination already exists: {dest_path}"
         )
+        result["display_args"] = {"dest_path": str(dest_path)}
         return result
 
     try:
         archive_root.mkdir(parents=False, exist_ok=True)
     except OSError as error:
+        result["code"] = "ARCHIVE_FAILED"
         result["message"] = f"Case archive failed: {error}"
+        result["display_args"] = {"error": str(error)}
         return result
 
     try:
         shutil.move(str(case_path), str(dest_path))
     except OSError as error:
+        result["code"] = "ARCHIVE_FAILED"
         result["message"] = f"Case archive failed: {error}"
+        result["display_args"] = {"error": str(error)}
         return result
 
     session.recovery_path = str(dest_path.resolve())
     result["success"] = True
+    result["code"] = "ARCHIVED_SUCCESS"
     result["message"] = f"Case archived to {dest_path}"
+    result["display_args"] = {"dest_path": str(dest_path)}
     return result
 
 
@@ -214,25 +224,33 @@ def reopen_case(session):
     dest_path = recoveries_root / session.session_id
 
     if not case_path.is_dir():
+        result["code"] = "ARCHIVED_NOT_FOUND"
         result["message"] = f"Archived case folder not found: {case_path}"
+        result["display_args"] = {"case_path": str(case_path)}
         return result
 
     if dest_path.exists():
+        result["code"] = "REOPEN_EXISTS"
         result["message"] = (
             f"Recoveries destination already exists: {dest_path}"
         )
+        result["display_args"] = {"dest_path": str(dest_path)}
         return result
 
     try:
         recoveries_root.mkdir(parents=True, exist_ok=True)
         shutil.move(str(case_path), str(dest_path))
     except OSError as error:
+        result["code"] = "REOPEN_FAILED"
         result["message"] = f"Case reopen failed: {error}"
+        result["display_args"] = {"error": str(error)}
         return result
 
     session.recovery_path = str(dest_path.resolve())
     result["success"] = True
+    result["code"] = "REOPENED_SUCCESS"
     result["message"] = f"Case reopened to {dest_path}"
+    result["display_args"] = {"dest_path": str(dest_path)}
     return result
 
 

@@ -202,6 +202,7 @@ def _reidentify_source_device(recovery_path, manifest, devices, warnings):
                 "Source device is not connected or could not be matched "
                 f"using {identity_source}."
             ),
+            "display_args": {"identity_source": identity_source},
         }
 
     if len(matches) > 1:
@@ -214,6 +215,7 @@ def _reidentify_source_device(recovery_path, manifest, devices, warnings):
                 "Ambiguous source device match. Multiple candidates: "
                 f"{candidate_paths}"
             ),
+            "display_args": {"candidate_paths": candidate_paths},
         }
 
     device = matches[0]
@@ -266,6 +268,7 @@ def _reidentify_destination_device(manifest, devices, warnings):
                 "Ambiguous destination device match. Multiple candidates: "
                 f"{candidate_paths}"
             ),
+            "display_args": {"candidate_paths": candidate_paths},
         }
 
     device = matches[0]
@@ -435,6 +438,7 @@ def load_case(recovery_path, devices):
             "warnings": warnings,
             "code": CODE_MANIFEST_ERROR,
             "message": str(error),
+            "display_args": {"message": str(error)},
         }
 
     if not case_path.is_dir():
@@ -447,6 +451,7 @@ def load_case(recovery_path, devices):
             "warnings": warnings,
             "code": CODE_CASE_PATH_NOT_ACCESSIBLE,
             "message": f"Recovery case path is not accessible: {case_path}",
+            "display_args": {"case_path": str(case_path)},
         }
 
     try:
@@ -463,6 +468,7 @@ def load_case(recovery_path, devices):
             "message": (
                 f"case.json created_at is invalid: {manifest['created_at']}"
             ),
+            "display_args": {"created_at": manifest["created_at"]},
         }
 
     status = manifest["status"]
@@ -504,6 +510,7 @@ def load_case(recovery_path, devices):
                 "warnings": warnings,
                 "code": source_result.get("code"),
                 "message": source_result["message"],
+                "display_args": source_result.get("display_args"),
             }
 
     session.source_device = source_result["device"]
@@ -534,6 +541,7 @@ def load_case(recovery_path, devices):
                 "warnings": warnings,
                 "code": destination_result.get("code"),
                 "message": destination_result["message"],
+                "display_args": destination_result.get("display_args"),
             }
 
     assessment = _reconstruct_assessment(manifest, session.source_device)

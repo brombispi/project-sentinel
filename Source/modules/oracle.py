@@ -13,25 +13,25 @@ def create_strategy(assessment: Assessment):
     if assessment.decision.status == "STOP":
         return Strategy(
             status="STOP",
-            goal="Protect the original device.",
+            goal="oracle.goal.protect_device",
             priority="CRITICAL",
             steps=[
-                "Do not perform any recovery operation.",
-                assessment.decision.recommendation
+                "oracle.step.stop_no_recovery",
+                assessment.decision.recommendation,
             ],
-            reason=assessment.decision.reason
+            reason=assessment.decision.reason,
         )
 
     return Strategy(
         status="APPROVED",
-        goal="Preserve the original device.",
+        goal="oracle.goal.preserve_device",
         priority="HIGH",
         steps=[
-            "Create a forensic image.",
-            "Verify image integrity.",
-            "Perform recovery on the image, not the original device."
+            "oracle.step.create_forensic_image",
+            "oracle.step.verify_image_integrity",
+            "oracle.step.recover_on_image",
         ],
-        reason=assessment.decision.reason
+        reason=assessment.decision.reason,
     )
 
 
@@ -46,5 +46,5 @@ def recommend_recovery_method():
     return {
         "recommended_operation": "photorec",
         "confidence": "LOW",
-        "reason": "PhotoRec is currently the only integrated recovery method.",
+        "reason": "oracle.recovery.photorec_only",
     }

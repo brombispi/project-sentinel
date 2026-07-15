@@ -79,16 +79,21 @@ def relocate_recovery_case(session, mount_point):
     dest_path = Path(mount_point) / "Recoveries" / session.session_id
 
     if not local_path.is_dir():
+        result["code"] = "RELOCATE_LOCAL_NOT_FOUND"
         result["message"] = "Local recovery case folder not found."
         log_error(session, "ARCHIVE", result["message"])
         return result
 
     if not Path(mount_point).is_dir():
+        result["code"] = "RELOCATE_MOUNT_NOT_FOUND"
+        result["display_args"] = {"mount_point": mount_point}
         result["message"] = f"Destination mount point not found: {mount_point}"
         log_error(session, "ARCHIVE", result["message"])
         return result
 
     if dest_path.exists():
+        result["code"] = "RELOCATE_DESTINATION_EXISTS"
+        result["display_args"] = {"dest_path": str(dest_path)}
         result["message"] = f"Destination case folder already exists: {dest_path}"
         log_error(session, "ARCHIVE", result["message"])
         return result
@@ -97,6 +102,8 @@ def relocate_recovery_case(session, mount_point):
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(local_path), str(dest_path))
     except OSError as error:
+        result["code"] = "RELOCATE_FAILED"
+        result["display_args"] = {"error": str(error)}
         result["message"] = f"Recovery case relocation failed: {error}"
         log_error(session, "ARCHIVE", result["message"])
         return result
@@ -104,6 +111,8 @@ def relocate_recovery_case(session, mount_point):
     session.recovery_path = str(dest_path)
     result["success"] = True
     result["status"] = "completed"
+    result["code"] = "RELOCATE_SUCCESS"
+    result["display_args"] = {"dest_path": str(dest_path)}
     result["message"] = f"Recovery case relocated to {dest_path}"
     log_info(session, "ARCHIVE", result["message"])
     return result
@@ -150,6 +159,7 @@ def classify_acquisition_state(recovery_path):
 
     if not image_exists and not map_exists:
         result["state"] = "no_acquisition"
+        result["code"] = "ACQUISITION_NO_ARTIFACTS"
         result["message"] = "No acquisition artifacts present."
         return result
 
@@ -157,6 +167,8 @@ def classify_acquisition_state(recovery_path):
         missing = MAP_FILENAME if image_exists else IMAGE_FILENAME
         present = IMAGE_FILENAME if image_exists else MAP_FILENAME
         result["state"] = "inconsistent_artifacts"
+        result["code"] = "ACQUISITION_INCONSISTENT"
+        result["display_args"] = {"present": present, "missing": missing}
         result["message"] = (
             f"Inconsistent acquisition artifacts: {present} exists "
             f"but {missing} is missing."
@@ -165,6 +177,7 @@ def classify_acquisition_state(recovery_path):
 
     if sha_exists:
         result["state"] = "completed_canonical"
+        result["code"] = "ACQUISITION_COMPLETED_CANONICAL"
         result["message"] = (
             "Canonical acquisition is complete and fingerprint exists."
         )
@@ -176,17 +189,20 @@ def classify_acquisition_state(recovery_path):
 
     if map_classification["status"] == "unreadable":
         result["state"] = "invalid_map"
+        result["code"] = "ACQUISITION_INVALID_MAP"
         result["message"] = "ddrescue map state is unreadable."
         return result
 
     if map_classification["status"] == "finished":
         result["state"] = "imaging_complete_fingerprint_missing"
+        result["code"] = "ACQUISITION_FINGERPRINT_MISSING"
         result["message"] = (
             "Imaging is complete but SHA-256 fingerprint is missing."
         )
         return result
 
     result["state"] = "incomplete_ddrescue"
+    result["code"] = "ACQUISITION_INCOMPLETE_DDRESCUE"
     result["message"] = "Incomplete ddrescue acquisition may be resumed."
     return result
 
@@ -235,6 +251,7 @@ def validate_source_identity_for_resume(session):
     }
 
     if recorded is None:
+        result["code"] = "IDENTITY_SOURCE_MISSING"
         result["message"] = (
             "Resume refused: acquisition_source.json is missing."
         )
@@ -250,12 +267,14 @@ def validate_source_identity_for_resume(session):
     current_path = _normalize_identity_text(session.source_device.path)
 
     if current_size is None:
+        result["code"] = "IDENTITY_SIZE_UNDETERMINED"
         result["message"] = (
             "Resume refused: current source size could not be determined."
         )
         return result
 
     if recorded_size != current_size:
+        result["code"] = "IDENTITY_SIZE_MISMATCH"
         result["message"] = (
             "Resume refused: source size_bytes does not match "
             "acquisition_source.json."
@@ -267,23 +286,27 @@ def validate_source_identity_for_resume(session):
 
     if recorded_serial_trustworthy and current_serial_trustworthy:
         if recorded_serial != current_serial:
+            result["code"] = "IDENTITY_SERIAL_MISMATCH"
             result["message"] = (
                 "Resume refused: source serial does not match "
                 "acquisition_source.json."
             )
             return result
     elif recorded_serial_trustworthy != current_serial_trustworthy:
+        result["code"] = "IDENTITY_SERIAL_UNSTABLE"
         result["message"] = (
             "Resume refused: serial identity is missing or unstable."
         )
         return result
     else:
+        result["code"] = "IDENTITY_SERIAL_UNAVAILABLE"
         result["message"] = (
             "Resume refused: trustworthy serial identity is unavailable."
         )
         return result
 
     if recorded_model != current_model:
+        result["code"] = "IDENTITY_MODEL_MISMATCH"
         result["message"] = (
             "Resume refused: source model does not match "
             "acquisition_source.json."
@@ -292,11 +315,21 @@ def validate_source_identity_for_resume(session):
 
     if recorded_path and current_path and recorded_path != current_path:
         result["warnings"].append(
-            f"Source path changed from {recorded_path} to {current_path}; "
-            "serial and size_bytes match."
+            {
+                "code": "IDENTITY_PATH_CHANGED",
+                "display_args": {
+                    "recorded_path": recorded_path,
+                    "current_path": current_path,
+                },
+                "message": (
+                    f"Source path changed from {recorded_path} to {current_path}; "
+                    "serial and size_bytes match."
+                ),
+            }
         )
 
     result["valid"] = True
+    result["code"] = "IDENTITY_MATCHES"
     result["message"] = "Source identity matches acquisition_source.json."
     return result
 
@@ -316,6 +349,7 @@ def write_acquisition_source(session):
     }
 
     if acquisition_source_path.is_file():
+        result["code"] = "ACQUISITION_SOURCE_EXISTS"
         result["message"] = (
             "acquisition_source.json already exists and is immutable."
         )
@@ -324,6 +358,7 @@ def write_acquisition_source(session):
     size_bytes = get_block_device_size_bytes(session.source_device.path)
 
     if size_bytes is None:
+        result["code"] = "ACQUISITION_SOURCE_SIZE_UNDETERMINED"
         result["message"] = (
             "Source size_bytes could not be determined for acquisition evidence."
         )
@@ -360,12 +395,15 @@ def write_acquisition_source(session):
                 temp_path.unlink()
             except OSError:
                 pass
+        result["code"] = "ACQUISITION_SOURCE_WRITE_FAILED"
+        result["display_args"] = {"error": str(error)}
         result["message"] = (
             f"acquisition_source.json could not be written: {error}"
         )
         return result
 
     result["success"] = True
+    result["code"] = "ACQUISITION_SOURCE_RECORDED"
     result["message"] = "acquisition_source.json recorded."
     log_info(
         session,
@@ -428,6 +466,7 @@ def unmount_source_descendants(session, mounted_descendants):
 
     if not mounted_descendants:
         result["success"] = True
+        result["code"] = "UNMOUNT_NONE_REQUIRED"
         result["message"] = "No mounted descendants required unmount."
         return result
 
@@ -477,23 +516,30 @@ def unmount_source_descendants(session, mounted_descendants):
     failures = [item for item in result["results"] if not item["success"]]
 
     if failures:
+        result["code"] = "UNMOUNT_FAILED"
         result["message"] = (
             "One or more descendant filesystems could not be unmounted."
         )
         return result
 
     result["success"] = True
+    result["code"] = "UNMOUNT_SUCCESS"
     result["message"] = "All requested descendant filesystems were unmounted."
     return result
 
 
-def _refuse_imaging_result(message):
-    return {
+def _refuse_imaging_result(message, *, code=None, display_args=None):
+    result = {
         "success": False,
         "status": "refused",
         "artifacts": [],
         "message": message,
     }
+    if code is not None:
+        result["code"] = code
+    if display_args is not None:
+        result["display_args"] = display_args
+    return result
 
 
 def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None):
@@ -517,6 +563,7 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
     }
 
     if not shutil.which("ddrescue"):
+        result["code"] = "IMAGING_DDRESCUE_NOT_INSTALLED"
         result["message"] = "ddrescue is not installed."
         log_error(session, "ARCHIVE", result["message"])
         return result
@@ -535,7 +582,10 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
                     "Resume refused: canonical acquisition is complete."
                 )
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_RESUME_REFUSED_CANONICAL",
+                )
 
             if acquisition_state["state"] == (
                 "imaging_complete_fingerprint_missing"
@@ -544,35 +594,52 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
                     "Resume refused: imaging is already complete."
                 )
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_RESUME_REFUSED_COMPLETE",
+                )
 
             if acquisition_state["state"] == "invalid_map":
                 message = "Resume refused: ddrescue map is unreadable."
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_RESUME_REFUSED_MAP_UNREADABLE",
+                )
 
             if acquisition_state["state"] == "inconsistent_artifacts":
                 message = (
                     "Resume refused: acquisition artifacts are inconsistent."
                 )
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_RESUME_REFUSED_INCONSISTENT",
+                )
 
             message = (
                 f"Resume refused: acquisition state is "
                 f"{acquisition_state['state']}."
             )
             log_error(session, "ARCHIVE", message)
-            return _refuse_imaging_result(message)
+            return _refuse_imaging_result(
+                message,
+                code="IMAGING_RESUME_REFUSED_STATE",
+                display_args={"state": acquisition_state["state"]},
+            )
 
         identity_result = validate_source_identity_for_resume(session)
 
         for warning in identity_result["warnings"]:
-            log_warning(session, "ARCHIVE", warning)
+            log_warning(session, "ARCHIVE", warning["message"])
 
         if not identity_result["valid"]:
             log_error(session, "ARCHIVE", identity_result["message"])
-            return _refuse_imaging_result(identity_result["message"])
+            return _refuse_imaging_result(
+                identity_result["message"],
+                code=identity_result.get("code"),
+                display_args=identity_result.get("display_args"),
+            )
     else:
         if acquisition_state["state"] != "no_acquisition":
             if acquisition_state["state"] == "completed_canonical":
@@ -580,26 +647,39 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
                     "Imaging refused: canonical acquisition is complete."
                 )
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_REFUSED_CANONICAL",
+                )
 
             if acquisition_state["state"] == "invalid_map":
                 message = "Imaging refused: ddrescue map is unreadable."
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_REFUSED_MAP_UNREADABLE",
+                )
 
             if acquisition_state["state"] == "inconsistent_artifacts":
                 message = (
                     "Imaging refused: acquisition artifacts are inconsistent."
                 )
                 log_error(session, "ARCHIVE", message)
-                return _refuse_imaging_result(message)
+                return _refuse_imaging_result(
+                    message,
+                    code="IMAGING_REFUSED_INCONSISTENT",
+                )
 
             message = (
                 f"Imaging refused: acquisition state is "
                 f"{acquisition_state['state']}."
             )
             log_error(session, "ARCHIVE", message)
-            return _refuse_imaging_result(message)
+            return _refuse_imaging_result(
+                message,
+                code="IMAGING_REFUSED_STATE",
+                display_args={"state": acquisition_state["state"]},
+            )
 
     mounted_descendants = observe_source_mounted_descendants(
         session,
@@ -621,7 +701,11 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
             "ARCHIVE",
             "Pre-ddrescue mount verification failed.",
         )
-        return _refuse_imaging_result(message)
+        return _refuse_imaging_result(
+            message,
+            code="IMAGING_REFUSED_MOUNTED_DESCENDANTS",
+            display_args={"mount_summary": mount_summary},
+        )
 
     log_info(
         session,
@@ -635,7 +719,10 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
                 "Resume refused: source.img and source.map must both exist."
             )
             log_error(session, "ARCHIVE", message)
-            return _refuse_imaging_result(message)
+            return _refuse_imaging_result(
+                message,
+                code="IMAGING_RESUME_ARTIFACTS_MISSING",
+            )
 
         map_classification = classify_ddrescue_map_status(map_path)
         log_info(
@@ -651,7 +738,10 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
         if map_classification["status"] != "incomplete":
             message = "Resume refused: ddrescue map is not resumable."
             log_error(session, "ARCHIVE", message)
-            return _refuse_imaging_result(message)
+            return _refuse_imaging_result(
+                message,
+                code="IMAGING_RESUME_MAP_NOT_RESUMABLE",
+            )
 
         log_info(
             session,
@@ -664,14 +754,21 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
                 "Imaging refused: source.img and source.map must both be absent."
             )
             log_error(session, "ARCHIVE", message)
-            return _refuse_imaging_result(message)
+            return _refuse_imaging_result(
+                message,
+                code="IMAGING_REFUSED_ARTIFACTS_PRESENT",
+            )
 
         acquisition_record = write_acquisition_source(session)
 
         if not acquisition_record["success"]:
             message = acquisition_record["message"]
             log_error(session, "ARCHIVE", message)
-            return _refuse_imaging_result(message)
+            return _refuse_imaging_result(
+                message,
+                code=acquisition_record.get("code"),
+                display_args=acquisition_record.get("display_args"),
+            )
 
         log_info(
             session,
@@ -701,6 +798,7 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
 
         result["status"] = "interrupted"
         result["interrupted"] = True
+        result["code"] = "IMAGING_INTERRUPTED"
         result["message"] = "Forensic imaging interrupted by operator."
         result["artifacts"] = artifacts
         log_operator(
@@ -717,6 +815,11 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
             str(image_path),
             str(map_path),
         ]
+        result["code"] = (
+            "IMAGING_RESUMED_SUCCESS"
+            if resume
+            else "IMAGING_CREATED_SUCCESS"
+        )
         result["message"] = (
             "Forensic imaging resumed successfully."
             if resume
@@ -732,6 +835,8 @@ def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None)
             ),
         )
     else:
+        result["code"] = "IMAGING_DDRESCUE_EXIT"
+        result["display_args"] = {"exit_code": completed.returncode}
         result["message"] = (
             f"ddrescue exited with code {completed.returncode}."
         )
@@ -753,6 +858,8 @@ def _compute_sha256_digest(file_path, image_size):
     Prints percentage progress when the whole percent changes.
     """
 
+    from i18n import tr
+
     digest = hashlib.sha256()
     bytes_read = 0
     last_percent = -1
@@ -761,7 +868,11 @@ def _compute_sha256_digest(file_path, image_size):
     try:
         with open(file_path, "rb") as image_file:
             if image_size == 0:
-                print("Fingerprinting: 100%", end="", flush=True)
+                print(
+                    tr("imaging.fingerprint.progress", percent=100),
+                    end="",
+                    flush=True,
+                )
                 progress_started = True
             else:
                 while True:
@@ -774,7 +885,8 @@ def _compute_sha256_digest(file_path, image_size):
                     percent = (bytes_read * 100) // image_size
                     if percent != last_percent:
                         print(
-                            f"\rFingerprinting: {percent}%",
+                            "\r"
+                            + tr("imaging.fingerprint.progress", percent=percent),
                             end="",
                             flush=True,
                         )
@@ -814,6 +926,7 @@ def verify_forensic_image(session):
     }
 
     if not image_path.is_file():
+        result["code"] = "INTEGRITY_IMAGE_NOT_FOUND"
         result["message"] = (
             "Forensic image not found. The image was not deleted."
         )
@@ -827,6 +940,7 @@ def verify_forensic_image(session):
     try:
         image_size = image_path.stat().st_size
     except OSError as error:
+        result["code"] = "INTEGRITY_SIZE_UNDETERMINED"
         result["message"] = (
             "Forensic image size could not be determined."
         )
@@ -848,6 +962,7 @@ def verify_forensic_image(session):
     try:
         digest_hex = _compute_sha256_digest(image_path, image_size)
     except OSError as error:
+        result["code"] = "INTEGRITY_READ_FAILED"
         result["message"] = (
             "Forensic image could not be read completely."
         )
@@ -879,6 +994,7 @@ def verify_forensic_image(session):
                 temp_path.unlink()
             except OSError:
                 pass
+        result["code"] = "INTEGRITY_SAVE_FAILED"
         result["message"] = (
             "Fingerprint evidence could not be saved."
         )
@@ -893,6 +1009,7 @@ def verify_forensic_image(session):
     result["status"] = "completed"
     result["digest"] = digest_hex
     result["artifacts"] = [str(evidence_path)]
+    result["code"] = "INTEGRITY_HASH_RECORDED"
     result["message"] = "Hash recorded."
 
     log_info(
@@ -974,16 +1091,20 @@ def execute_photorec_recovery(session):
     }
 
     if not shutil.which("photorec"):
+        result["code"] = "PHOTOREC_NOT_INSTALLED"
         result["message"] = "PhotoRec is not installed."
         log_error(session, "ARCHIVE", result["message"])
         return result
 
     if not image_path.is_file():
+        result["code"] = "PHOTOREC_IMAGE_NOT_FOUND"
+        result["display_args"] = {"image_path": str(image_path)}
         result["message"] = f"Forensic image not found: {image_path}"
         log_error(session, "ARCHIVE", result["message"])
         return result
 
     if session.source_device and str(image_path) == session.source_device.path:
+        result["code"] = "PHOTOREC_REFUSED_ORIGINAL"
         result["message"] = "Refusing to run PhotoRec on the original device path."
         log_error(session, "ARCHIVE", result["message"])
         return result
@@ -1014,9 +1135,12 @@ def execute_photorec_recovery(session):
     if completed.returncode == 0:
         result["success"] = True
         result["status"] = "ended"
+        result["code"] = "PHOTOREC_ENDED_NORMALLY"
         result["message"] = "PhotoRec session ended normally."
         log_info(session, "ARCHIVE", result["message"])
     else:
+        result["code"] = "PHOTOREC_EXIT_CODE"
+        result["display_args"] = {"exit_code": completed.returncode}
         result["message"] = (
             f"PhotoRec session failed with exit code "
             f"{completed.returncode}."
