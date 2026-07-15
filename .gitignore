@@ -23,3 +23,10 @@ Reports/
 
 # VS Code
 .vscode/
+
+# Runtime recovery cases
+Source/Recoveries/
+Source/Archive/
+
+# Runtime state
+Source/state/*.lock
