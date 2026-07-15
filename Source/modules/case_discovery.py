@@ -179,7 +179,12 @@ def archive_case(session):
         return result
 
     try:
-        archive_root.mkdir(parents=True, exist_ok=True)
+        archive_root.mkdir(parents=False, exist_ok=True)
+    except OSError as error:
+        result["message"] = f"Case archive failed: {error}"
+        return result
+
+    try:
         shutil.move(str(case_path), str(dest_path))
     except OSError as error:
         result["message"] = f"Case archive failed: {error}"

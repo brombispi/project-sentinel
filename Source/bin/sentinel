@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,7 @@ from modules.archive import (
     verify_forensic_image,
 )
 from modules.echo import log_info, log_operator, log_warning, log_error
-from modules.manifest import write_initial_case_manifest
+from modules.manifest import ManifestError, read_case_manifest, write_initial_case_manifest
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
 from modules.janus import evaluate_destination
@@ -38,13 +39,117 @@ from modules.device_selection import (
 from modules.case_discovery import (
     archive_case,
     discover_cases,
+    enumerate_archive_roots,
     get_runtime_recoveries_root,
-    is_archived_case_path,
     reopen_case,
 )
-from modules.case_loader import load_case, resolve_resume_status
+from modules.case_loader import (
+    CODE_AMBIGUOUS_DESTINATION,
+    CODE_AMBIGUOUS_SOURCE,
+    CODE_DESTINATION_NOT_CONNECTED,
+    CODE_DESTINATION_NOT_MOUNTED,
+    CODE_SOURCE_NOT_CONNECTED,
+    load_case,
+    resolve_resume_status,
+)
+from i18n import (
+    get_language,
+    init_language,
+    set_language,
+    tr,
+)
 from core.codex import Codex
+from core.session import RecoverySession
 from core.status import RecoveryStatus
+
+init_language(PROJECT_ROOT)
+
+
+def _confirmed_yes(response):
+    return response.strip().lower() in ("y", "j")
+
+
+def _language_display_name(language_code):
+    return {
+        "en": "English",
+        "de": "Deutsch",
+    }.get(language_code, language_code)
+
+
+def _log_case_load_failure(session, load_result):
+    code = load_result.get("code")
+    message = load_result.get("message", "")
+
+    if code == CODE_AMBIGUOUS_SOURCE:
+        log_warning(
+            session,
+            "SENTINEL",
+            "Ambiguous source device match.",
+        )
+        return
+
+    if code == CODE_AMBIGUOUS_DESTINATION:
+        log_warning(
+            session,
+            "SENTINEL",
+            "Ambiguous destination device match.",
+        )
+        return
+
+    if code == CODE_SOURCE_NOT_CONNECTED:
+        log_error(
+            session,
+            "SENTINEL",
+            "Source device missing.",
+        )
+        return
+
+    if code in (
+        CODE_DESTINATION_NOT_CONNECTED,
+        CODE_DESTINATION_NOT_MOUNTED,
+    ):
+        log_error(
+            session,
+            "SENTINEL",
+            "Destination device missing.",
+        )
+        return
+
+    log_error(
+        session,
+        "SENTINEL",
+        f"Case load failed: {message}",
+    )
+
+
+def _prompt_language_selection():
+    print()
+    print("=" * 42)
+    print(tr("language.prompt.title"))
+    print("=" * 42)
+    print()
+    print(tr("language.option.en"))
+    print(tr("language.option.de"))
+    print(tr("language.option.cancel"))
+    print()
+
+    while True:
+        choice = input(tr("language.prompt.select")).strip().lower()
+
+        if choice == "1":
+            set_language("en")
+            print(tr("language.saved"))
+            return
+
+        if choice == "2":
+            set_language("de")
+            print(tr("language.saved"))
+            return
+
+        if choice in ("c", "cancel"):
+            return
+
+        print(tr("validation.invalid_selection"))
 
 
 def _print_mounted_descendants(mounted_descendants):
@@ -842,7 +947,7 @@ def _run_assessment_pipeline(session, intake, devices):
 
     if session.source_device is None:
         print_device_selection_list(
-            "SOURCE DEVICE SELECTION",
+            tr("device.source.title"),
             devices,
         )
         source_device = select_source_device(devices)
@@ -936,7 +1041,7 @@ def _run_assessment_pipeline(session, intake, devices):
         ]
 
         print_device_selection_list(
-            "DESTINATION DEVICE SELECTION",
+            tr("device.destination.title"),
             destination_candidates,
         )
 
@@ -1045,7 +1150,15 @@ def _require_assessment(session, assessment, workflow_name):
     return None
 
 
-def route_case(session, intake, assessment, devices, warnings):
+def route_case(
+    session,
+    intake,
+    assessment,
+    devices,
+    warnings,
+    *,
+    archive_reopened=False,
+):
     for warning in warnings:
         log_warning(session, "SENTINEL", warning)
 
@@ -1054,45 +1167,6 @@ def route_case(session, intake, assessment, devices, warnings):
         "SENTINEL",
         f"Case opened: {session.session_id}",
     )
-
-    if is_archived_case_path(session.recovery_path, devices):
-        print()
-        print(f"Recovery Case : {session.session_id}")
-        print(f"Case Name     : {session.case_name}")
-        print(f"Case Location : {session.recovery_path}")
-        print()
-        print("This case is archived.")
-        reopen_confirm = input("Reopen it? [y/N]: ").strip().lower()
-
-        if reopen_confirm != "y":
-            log_operator(
-                session,
-                "SENTINEL",
-                "Archived case reopen declined.",
-            )
-            return
-
-        log_operator(
-            session,
-            "SENTINEL",
-            "Archived case reopen approved.",
-        )
-        reopen_result = reopen_case(session)
-        if not reopen_result["success"]:
-            log_error(
-                session,
-                "SENTINEL",
-                reopen_result["message"],
-            )
-            print()
-            print(reopen_result["message"])
-            return
-
-        log_info(
-            session,
-            "SENTINEL",
-            f"Case reopened: {reopen_result['message']}",
-        )
 
     if session.source_device:
         log_info(
@@ -1132,26 +1206,28 @@ def route_case(session, intake, assessment, devices, warnings):
         RecoveryStatus.COMPLETED,
         RecoveryStatus.CANCELLED,
     ):
-        print()
-        print(f"Case status: {status}")
-        print("Recovery work was previously finalized for this case.")
-        reopen_confirm = input(
-            "Reopen case for additional work? [y/N]: "
-        ).strip().lower()
+        if not archive_reopened:
+            print()
+            print(f"Case status: {status}")
+            print("Recovery work was previously finalized for this case.")
+            reopen_confirm = input(
+                "Reopen case for additional work? [y/N]: "
+            ).strip().lower()
 
-        if reopen_confirm != "y":
+            if reopen_confirm != "y":
+                log_operator(
+                    session,
+                    "SENTINEL",
+                    "Case reopen declined.",
+                )
+                return
+
             log_operator(
                 session,
                 "SENTINEL",
-                "Case reopen declined.",
+                "Case reopen approved.",
             )
-            return
 
-        log_operator(
-            session,
-            "SENTINEL",
-            "Case reopen approved.",
-        )
         status = resolve_resume_status(session)
         assessment = _require_assessment(
             session,
@@ -1396,14 +1472,22 @@ def route_case(session, intake, assessment, devices, warnings):
 
 
 def _prompt_startup_menu():
-    print("[1] Create New Recovery Case")
-    print("[2] Active Cases")
-    print("[3] Archived Cases")
-    print("[C] Cancel")
+    print(tr("startup.menu.create"))
+    print(tr("startup.menu.active"))
+    print(tr("startup.menu.archived"))
+    print(tr("startup.menu.language"))
+    print(tr("startup.menu.cancel"))
+    print()
+    print(
+        tr(
+            "startup.language_line",
+            language=_language_display_name(get_language()),
+        )
+    )
     print()
 
     while True:
-        choice = input("Select action [1-3 / C]: ").strip().lower()
+        choice = input(tr("startup.prompt.select_action")).strip().lower()
 
         if choice == "1":
             return "new"
@@ -1411,10 +1495,17 @@ def _prompt_startup_menu():
             return "active"
         if choice == "3":
             return "archived"
+        if choice in ("l", "language"):
+            _prompt_language_selection()
+            print("==========================================")
+            print(tr("startup.title"))
+            print("==========================================")
+            print()
+            continue
         if choice in ("c", "cancel"):
             return "cancel"
 
-        print("Invalid selection.")
+        print(tr("validation.invalid_selection"))
 
 
 def _prompt_case_selection(records, *, title):
@@ -1425,18 +1516,37 @@ def _prompt_case_selection(records, *, title):
 
     for index, record in enumerate(records, start=1):
         print(f"[{index}] {record['session_id']}  {record['case_name']}")
-        print(f"    Status  : {record['status']}")
-        print(f"    Created : {record['created_at']}")
-        print(f"    Location: {record['recovery_path']}")
+        print(
+            tr(
+                "case.list.status",
+                status=record["status"],
+            )
+        )
+        print(
+            tr(
+                "case.list.created",
+                created_at=record["created_at"],
+            )
+        )
+        print(
+            tr(
+                "case.list.location",
+                recovery_path=record["recovery_path"],
+            )
+        )
         for warning in record.get("warnings", []):
-            print(f"    Warning : {warning}")
+            print(tr("case.list.warning", warning=warning))
         print()
 
-    print("[C] Cancel")
+    print(tr("case.menu.cancel"))
     print()
 
+    case_range = f"1-{len(records)}"
+
     while True:
-        choice = input(f"Select case [1-{len(records)} / C]: ").strip().lower()
+        choice = input(
+            tr("case.prompt.select_case", range=case_range)
+        ).strip().lower()
 
         if choice in ("c", "cancel"):
             return None
@@ -1444,26 +1554,32 @@ def _prompt_case_selection(records, *, title):
         try:
             selection = int(choice)
         except ValueError:
-            print("Invalid selection.")
+            print(tr("validation.invalid_selection"))
             continue
 
         if 1 <= selection <= len(records):
             return records[selection - 1]
 
-        print("Invalid selection.")
+        print(tr("validation.invalid_selection"))
 
 
 def _prompt_active_case_action(record):
     print()
-    print(f"Selected: {record['session_id']}  {record['case_name']}")
+    print(
+        tr(
+            "case.label.selected",
+            session_id=record["session_id"],
+            case_name=record["case_name"],
+        )
+    )
     print()
-    print("[1] Open")
-    print("[2] Archive")
-    print("[C] Cancel")
+    print(tr("case.menu.open"))
+    print(tr("case.menu.archive"))
+    print(tr("case.menu.cancel"))
     print()
 
     while True:
-        choice = input("Select action [1-2 / C]: ").strip().lower()
+        choice = input(tr("case.prompt.select_action")).strip().lower()
 
         if choice == "1":
             return "open"
@@ -1472,39 +1588,20 @@ def _prompt_active_case_action(record):
         if choice in ("c", "cancel"):
             return "cancel"
 
-        print("Invalid selection.")
+        print(tr("validation.invalid_selection"))
 
 
 def _open_selected_case(selected, devices):
     load_result = load_case(selected["recovery_path"], devices)
 
     for warning in load_result["warnings"]:
-        print(f"Load warning: {warning}")
+        print(tr("load.warning", warning=warning))
 
     if not load_result["success"]:
         print()
         print(load_result["message"])
         if load_result["session"] is not None:
-            session = load_result["session"]
-            message = load_result["message"]
-            if "Ambiguous" in message:
-                log_warning(
-                    session,
-                    "SENTINEL",
-                    "Ambiguous source device match.",
-                )
-            elif "not connected" in message or "missing" in message.lower():
-                log_error(
-                    session,
-                    "SENTINEL",
-                    "Source device missing.",
-                )
-            else:
-                log_error(
-                    session,
-                    "SENTINEL",
-                    f"Case load failed: {message}",
-                )
+            _log_case_load_failure(load_result["session"], load_result)
         return
 
     route_case(
@@ -1516,11 +1613,105 @@ def _open_selected_case(selected, devices):
     )
 
 
+def _open_archived_case(selected, devices):
+    case_path = Path(selected["recovery_path"])
+    permitted_roots = [
+        root_info["path"]
+        for root_info in enumerate_archive_roots(devices)
+    ]
+
+    try:
+        manifest = read_case_manifest(
+            case_path,
+            permitted_roots=permitted_roots,
+        )
+    except ManifestError as error:
+        print()
+        print(error)
+        return
+
+    print()
+    print(tr("case.label.recovery_case"), manifest["session_id"])
+    print(tr("case.label.case_name"), manifest.get("case_name", ""))
+    print(tr("case.label.status"), manifest["status"])
+    print(tr("case.label.created"), manifest["created_at"])
+    print(tr("case.label.location"), case_path)
+    print()
+    print(tr("case.archived.notice"))
+    reopen_confirm = input(tr("case.reopen.confirm")).strip().lower()
+
+    if not _confirmed_yes(reopen_confirm):
+        return
+
+    try:
+        created_at = datetime.fromisoformat(manifest["created_at"])
+    except ValueError:
+        print()
+        print(
+            f"case.json created_at is invalid: {manifest['created_at']}"
+        )
+        return
+
+    session = RecoverySession(
+        session_id=manifest["session_id"],
+        created_at=created_at,
+        status=manifest["status"],
+        recovery_path=str(case_path.resolve()),
+        case_name=manifest.get("case_name", ""),
+    )
+
+    log_operator(
+        session,
+        "SENTINEL",
+        "Archived case reopen approved.",
+    )
+
+    reopen_result = reopen_case(session)
+    if not reopen_result["success"]:
+        log_error(
+            session,
+            "SENTINEL",
+            reopen_result["message"],
+        )
+        print()
+        print(reopen_result["message"])
+        return
+
+    log_info(
+        session,
+        "SENTINEL",
+        f"Case reopened: {reopen_result['message']}",
+    )
+
+    selected["recovery_path"] = session.recovery_path
+
+    load_result = load_case(session.recovery_path, devices)
+
+    for warning in load_result["warnings"]:
+        print(tr("load.warning", warning=warning))
+
+    if not load_result["success"]:
+        print()
+        print(load_result["message"])
+        if load_result["session"] is not None:
+            _log_case_load_failure(load_result["session"], load_result)
+        return
+
+    route_case(
+        load_result["session"],
+        load_result["intake"],
+        load_result["assessment"],
+        load_result["devices"],
+        load_result["warnings"],
+        archive_reopened=True,
+    )
+
+
 def _archive_selected_case(selected, devices):
     load_result = load_case(selected["recovery_path"], devices)
 
     for warning in load_result["warnings"]:
-        print(f"Load warning: {warning}")
+        print(tr("load.warning", warning=warning))
 
     session = load_result["session"]
     if session is None:
@@ -1529,22 +1720,22 @@ def _archive_selected_case(selected, devices):
         return
 
     print()
-    print(f"Recovery Case : {session.session_id}")
-    print(f"Case Name     : {session.case_name}")
-    print(f"Case Location : {session.recovery_path}")
+    print(tr("case.label.recovery_case"), session.session_id)
+    print(tr("case.label.case_name"), session.case_name)
+    print(tr("case.label.location"), session.recovery_path)
     print()
 
     archive_confirm = input(
-        f"Archive case {session.session_id}? [y/N]: "
+        tr("case.archive.confirm", session_id=session.session_id)
     ).strip().lower()
 
-    if archive_confirm != "y":
+    if not _confirmed_yes(archive_confirm):
         log_operator(
             session,
             "SENTINEL",
             "Case archive declined.",
         )
-        print("Case archive cancelled.")
+        print(tr("case.archive.cancelled"))
         return
 
     log_operator(
@@ -1574,7 +1765,7 @@ def _archive_selected_case(selected, devices):
 
 
 def _run_new_case():
-    case_name = input("Case name: ").strip()
+    case_name = input(tr("case.name_prompt")).strip()
 
     session = create_session()
     intake = collect_case_intake()
@@ -1620,8 +1811,8 @@ def _run_new_case():
             f"Detected {device_count} storage devices.",
         )
 
-    print(f"Recovery Case : {session.session_id}")
-    print(f"Case Name     : {session.case_name}")
+    print(tr("case.label.recovery_case"), session.session_id)
+    print(tr("case.label.case_name"), session.case_name)
     print()
 
     strategy, smart_result, workflow_results = _run_assessment_pipeline(
@@ -1644,24 +1835,24 @@ def _run_active_cases():
     discovery = discover_cases(devices, archived=False)
 
     for warning in discovery["warnings"]:
-        print(f"Discovery warning: {warning}")
+        print(tr("discovery.warning", warning=warning))
 
     if not discovery["records"]:
         print()
-        print("No active recovery cases were found.")
+        print(tr("case.no_active"))
         return
 
     selected = _prompt_case_selection(
         discovery["records"],
-        title="ACTIVE CASES",
+        title=tr("case.active.title"),
     )
     if selected is None:
-        print("Case selection cancelled.")
+        print(tr("case.selection.cancelled"))
         return
 
     action = _prompt_active_case_action(selected)
     if action == "cancel":
-        print("Case action cancelled.")
+        print(tr("case.action.cancelled"))
         return
 
     if action == "archive":
@@ -1676,34 +1867,34 @@ def _run_archived_cases():
     discovery = discover_cases(devices, archived=True)
 
     for warning in discovery["warnings"]:
-        print(f"Discovery warning: {warning}")
+        print(tr("discovery.warning", warning=warning))
 
     if not discovery["records"]:
         print()
-        print("No archived recovery cases were found.")
+        print(tr("case.no_archived"))
         return
 
     selected = _prompt_case_selection(
         discovery["records"],
-        title="ARCHIVED CASES",
+        title=tr("case.archived.title"),
     )
     if selected is None:
-        print("Case selection cancelled.")
+        print(tr("case.selection.cancelled"))
         return
 
-    _open_selected_case(selected, devices)
+    _open_archived_case(selected, devices)
 
 
 def main():
     print("==========================================")
-    print("PROJECT SENTINEL")
+    print(tr("startup.title"))
     print("==========================================")
     print()
 
     action = _prompt_startup_menu()
 
     if action == "cancel":
-        print("Startup cancelled.")
+        print(tr("startup.cancelled"))
         return
 
     if action == "new":

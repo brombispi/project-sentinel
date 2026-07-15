@@ -17,6 +17,18 @@ from modules.storage_query import get_block_device_size_bytes
 
 TRUSTWORTHY_SERIAL_ABSENT = ("", "Unknown", "unknown", "N/A", "n/a")
 
+# Stable load-result codes for workflow branching. Not displayed to operators.
+CODE_MANIFEST_ERROR = "MANIFEST_ERROR"
+CODE_CASE_PATH_NOT_ACCESSIBLE = "CASE_PATH_NOT_ACCESSIBLE"
+CODE_INVALID_CREATED_AT = "INVALID_CREATED_AT"
+CODE_SOURCE_SIZE_BYTES_NOT_RECORDED = "SOURCE_SIZE_BYTES_NOT_RECORDED"
+CODE_SOURCE_NOT_CONNECTED = "SOURCE_NOT_CONNECTED"
+CODE_AMBIGUOUS_SOURCE = "AMBIGUOUS_SOURCE"
+CODE_DESTINATION_NOT_CONNECTED = "DESTINATION_NOT_CONNECTED"
+CODE_AMBIGUOUS_DESTINATION = "AMBIGUOUS_DESTINATION"
+CODE_DESTINATION_NOT_MOUNTED = "DESTINATION_NOT_MOUNTED"
+CODE_CASE_LOADED = "CASE_LOADED"
+
 
 def _normalize_identity_text(value):
     if value is None:
@@ -163,6 +175,7 @@ def _reidentify_source_device(recovery_path, manifest, devices, warnings):
             return {
                 "success": False,
                 "device": None,
+                "code": CODE_SOURCE_SIZE_BYTES_NOT_RECORDED,
                 "message": (
                     "Pre-acquisition source match refused: exact "
                     "size_bytes is not recorded in case.json."
@@ -184,6 +197,7 @@ def _reidentify_source_device(recovery_path, manifest, devices, warnings):
         return {
             "success": False,
             "device": None,
+            "code": CODE_SOURCE_NOT_CONNECTED,
             "message": (
                 "Source device is not connected or could not be matched "
                 f"using {identity_source}."
@@ -195,6 +209,7 @@ def _reidentify_source_device(recovery_path, manifest, devices, warnings):
         return {
             "success": False,
             "device": None,
+            "code": CODE_AMBIGUOUS_SOURCE,
             "message": (
                 "Ambiguous source device match. Multiple candidates: "
                 f"{candidate_paths}"
@@ -234,6 +249,7 @@ def _reidentify_destination_device(manifest, devices, warnings):
         return {
             "success": False,
             "device": None,
+            "code": CODE_DESTINATION_NOT_CONNECTED,
             "message": (
                 "Destination Recovery Storage is not mounted or could not "
                 "be matched to the persisted destination device."
@@ -245,6 +261,7 @@ def _reidentify_destination_device(manifest, devices, warnings):
         return {
             "success": False,
             "device": None,
+            "code": CODE_AMBIGUOUS_DESTINATION,
             "message": (
                 "Ambiguous destination device match. Multiple candidates: "
                 f"{candidate_paths}"
@@ -257,6 +274,7 @@ def _reidentify_destination_device(manifest, devices, warnings):
         return {
             "success": False,
             "device": None,
+            "code": CODE_DESTINATION_NOT_MOUNTED,
             "message": (
                 "Matched destination device is present but not mounted."
             ),
@@ -415,6 +433,7 @@ def load_case(recovery_path, devices):
             "assessment": None,
             "devices": devices,
             "warnings": warnings,
+            "code": CODE_MANIFEST_ERROR,
             "message": str(error),
         }
 
@@ -426,6 +445,7 @@ def load_case(recovery_path, devices):
             "assessment": None,
             "devices": devices,
             "warnings": warnings,
+            "code": CODE_CASE_PATH_NOT_ACCESSIBLE,
             "message": f"Recovery case path is not accessible: {case_path}",
         }
 
@@ -439,6 +459,7 @@ def load_case(recovery_path, devices):
             "assessment": None,
             "devices": devices,
             "warnings": warnings,
+            "code": CODE_INVALID_CREATED_AT,
             "message": (
                 f"case.json created_at is invalid: {manifest['created_at']}"
             ),
@@ -481,6 +502,7 @@ def load_case(recovery_path, devices):
                 "assessment": None,
                 "devices": devices,
                 "warnings": warnings,
+                "code": source_result.get("code"),
                 "message": source_result["message"],
             }
 
@@ -510,6 +532,7 @@ def load_case(recovery_path, devices):
                 ),
                 "devices": devices,
                 "warnings": warnings,
+                "code": destination_result.get("code"),
                 "message": destination_result["message"],
             }
 
@@ -527,6 +550,7 @@ def load_case(recovery_path, devices):
         "assessment": assessment,
         "devices": devices,
         "warnings": warnings,
+        "code": CODE_CASE_LOADED,
         "message": "Recovery case loaded.",
     }
 
