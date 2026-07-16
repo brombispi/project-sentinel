@@ -245,6 +245,9 @@
     "report.prompt.generate": "Generate Technician Report? [y/N]:",
     "report.label.saved_path": "Technician report saved: {path}",
 
+    "delivery.prompt.finalize": "Finalize recovery work? [y/N]:",
+    "delivery.label.finalized": "Recovery work finalized. Case status is now COMPLETED.",
+
     "route.label.recovery_case": "Recovery Case :",
     "route.label.case_name": "Case Name     :",
     "route.label.case_location": "Case Location :",

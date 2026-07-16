@@ -1192,7 +1192,7 @@ def _run_assessment_pipeline(session, intake, devices):
     return strategy, smart_result, workflow_results
 
 
-def _offer_technician_report(session, recovery_result):
+def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None):
     if recovery_result is None or not recovery_result["success"]:
         return
 
@@ -1217,7 +1217,51 @@ def _offer_technician_report(session, recovery_result):
     )
 
 
-def _finish_session(session, assessment, strategy, smart_result, workflow_results):
+def _offer_finalize_recovery(session, assessment, intake, recovery_result):
+    if session.status != RecoveryStatus.READY_FOR_RECOVERY:
+        return
+
+    if session.source_device is None or assessment is None:
+        return
+
+    finalize_confirm = input(tr("delivery.prompt.finalize")).strip().lower()
+
+    if not _confirmed_yes(finalize_confirm):
+        return
+
+    log_operator(
+        session,
+        "SENTINEL",
+        "Recovery finalization approved.",
+    )
+
+    update_status(
+        session,
+        RecoveryStatus.COMPLETED,
+        session.source_device,
+        assessment,
+        intake=intake,
+    )
+
+    print()
+    print(tr("delivery.label.finalized"))
+    _run_delivery_workflow(
+        session,
+        assessment,
+        intake,
+        recovery_result=recovery_result,
+    )
+
+
+def _finish_session(
+    session,
+    assessment,
+    strategy,
+    smart_result,
+    workflow_results,
+    *,
+    intake=None,
+):
     print()
     print_summary(
         assessment,
@@ -1234,7 +1278,12 @@ def _finish_session(session, assessment, strategy, smart_result, workflow_result
         ],
     )
 
-    _offer_technician_report(session, workflow_results["recovery_result"])
+    _offer_finalize_recovery(
+        session,
+        assessment,
+        intake,
+        workflow_results["recovery_result"],
+    )
 
     print("-" * 40)
 
@@ -1325,10 +1374,67 @@ def route_case(
 
     status = session.status
 
-    if status in (
-        RecoveryStatus.COMPLETED,
-        RecoveryStatus.CANCELLED,
-    ):
+    if status == RecoveryStatus.COMPLETED:
+        _run_delivery_workflow(
+            session,
+            assessment,
+            intake,
+            recovery_result=None,
+        )
+
+        if not archive_reopened:
+            print()
+            print(tr("route.label.case_status"), status)
+            print(tr("route.status.finalized"))
+            reopen_confirm = input(tr("route.prompt.reopen")).strip().lower()
+
+            if not _confirmed_yes(reopen_confirm):
+                log_operator(
+                    session,
+                    "SENTINEL",
+                    "Case reopen declined.",
+                )
+                return
+
+            log_operator(
+                session,
+                "SENTINEL",
+                "Case reopen approved.",
+            )
+
+        status = resolve_resume_status(session)
+        assessment = _require_assessment(
+            session,
+            assessment,
+            "Case reopen",
+        )
+        if assessment is None:
+            return
+
+        if session.source_device is None:
+            log_error(
+                session,
+                "SENTINEL",
+                "Case reopen refused: source device is not connected.",
+            )
+            print()
+            print(tr("error.source_missing"))
+            return
+
+        update_status(
+            session,
+            status,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+        log_info(
+            session,
+            "SENTINEL",
+            f"State routing decision: reopened to {status}",
+        )
+
+    elif status == RecoveryStatus.CANCELLED:
         if not archive_reopened:
             print()
             print(tr("route.label.case_status"), status)
@@ -1447,6 +1553,7 @@ def route_case(
             strategy,
             smart_result,
             workflow_results,
+            intake=intake,
         )
         return
 
@@ -1468,6 +1575,7 @@ def route_case(
             strategy,
             smart_result,
             workflow_results,
+            intake=intake,
         )
         return
 
@@ -1526,6 +1634,7 @@ def route_case(
                 strategy,
                 smart_result,
                 workflow_results,
+                intake=intake,
             )
             return
 
@@ -1574,6 +1683,7 @@ def route_case(
             strategy,
             smart_result,
             workflow_results,
+            intake=intake,
         )
         return
 
@@ -1944,6 +2054,7 @@ def _run_new_case():
         strategy,
         smart_result,
         workflow_results,
+        intake=intake,
     )
 
 

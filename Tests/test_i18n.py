@@ -344,8 +344,8 @@ class CaseLoaderCodeTests(unittest.TestCase):
         )
 
 
-class TechnicianReportOfferTests(unittest.TestCase):
-    def _load_offer_function(self):
+class DeliveryWorkflowTests(unittest.TestCase):
+    def _load_delivery_function(self):
         namespace = {
             "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
             "tr": lambda key, **kwargs: kwargs.get("path", key),
@@ -354,34 +354,42 @@ class TechnicianReportOfferTests(unittest.TestCase):
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
         }
-        offer = _load_sentinel_function(
-            "_offer_technician_report",
+        delivery = _load_sentinel_function(
+            "_run_delivery_workflow",
             namespace,
         )
-        return offer, namespace
+        return delivery, namespace
+
+    def _call_delivery(self, delivery, namespace, session, recovery_result):
+        delivery(
+            session,
+            mock.Mock(),
+            {"intake": {}},
+            recovery_result=recovery_result,
+        )
 
     def test_skips_prompt_when_recovery_not_successful(self):
-        offer, namespace = self._load_offer_function()
+        delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
 
         for recovery_result in (None, {"success": False}):
             with self.subTest(recovery_result=recovery_result):
                 namespace["input"].reset_mock()
-                offer(session, recovery_result)
+                self._call_delivery(delivery, namespace, session, recovery_result)
                 namespace["input"].assert_not_called()
 
     def test_declined_does_not_generate_report(self):
-        offer, namespace = self._load_offer_function()
+        delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
         namespace["input"].return_value = "n"
 
-        offer(session, {"success": True})
+        self._call_delivery(delivery, namespace, session, {"success": True})
 
         namespace["Hermes"].assert_not_called()
         namespace["log_info"].assert_not_called()
 
     def test_accepted_saves_report_and_logs(self):
-        offer, namespace = self._load_offer_function()
+        delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
         report_path = Path("/tmp/recovery/reports/technician_report.md")
         namespace["input"].return_value = "y"
@@ -389,7 +397,7 @@ class TechnicianReportOfferTests(unittest.TestCase):
             report_path
         )
 
-        offer(session, {"success": True})
+        self._call_delivery(delivery, namespace, session, {"success": True})
 
         namespace["Hermes"].assert_called_once_with(session)
         namespace["Hermes"].return_value.save_technician_report.assert_called_once_with()
@@ -400,7 +408,7 @@ class TechnicianReportOfferTests(unittest.TestCase):
         )
 
     def test_existing_report_displays_error_without_crashing(self):
-        offer, namespace = self._load_offer_function()
+        delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
         namespace["input"].return_value = "y"
         namespace["Hermes"].return_value.save_technician_report.side_effect = (
@@ -410,10 +418,275 @@ class TechnicianReportOfferTests(unittest.TestCase):
             )
         )
 
-        offer(session, {"success": True})
+        self._call_delivery(delivery, namespace, session, {"success": True})
 
         namespace["print"].assert_called()
         namespace["log_info"].assert_not_called()
+
+
+class FinalizeRecoveryOfferTests(unittest.TestCase):
+    def _recovery_status(self):
+        return type(
+            "RecoveryStatus",
+            (),
+            {
+                "READY_FOR_RECOVERY": "READY_FOR_RECOVERY",
+                "COMPLETED": "COMPLETED",
+            },
+        )()
+
+    def _load_finalize_function(self):
+        namespace = {
+            "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
+            "tr": lambda key, **kwargs: key,
+            "print": mock.Mock(),
+            "input": mock.Mock(),
+            "log_operator": mock.Mock(),
+            "update_status": mock.Mock(),
+            "_run_delivery_workflow": mock.Mock(),
+            "RecoveryStatus": self._recovery_status(),
+        }
+        finalize = _load_sentinel_function(
+            "_offer_finalize_recovery",
+            namespace,
+        )
+        return finalize, namespace
+
+    def _session(self, *, status="READY_FOR_RECOVERY", source_device=object()):
+        session = mock.Mock()
+        session.status = status
+        session.source_device = source_device
+        return session
+
+    def test_skips_prompt_when_not_ready_for_recovery(self):
+        finalize, namespace = self._load_finalize_function()
+        session = self._session(status="READY_FOR_IMAGING")
+
+        finalize(session, mock.Mock(), {"intake": {}}, None)
+
+        namespace["input"].assert_not_called()
+        namespace["update_status"].assert_not_called()
+        namespace["_run_delivery_workflow"].assert_not_called()
+
+    def test_skips_prompt_when_source_device_missing(self):
+        finalize, namespace = self._load_finalize_function()
+        session = self._session(source_device=None)
+
+        finalize(session, mock.Mock(), {"intake": {}}, None)
+
+        namespace["input"].assert_not_called()
+        namespace["update_status"].assert_not_called()
+        namespace["_run_delivery_workflow"].assert_not_called()
+
+    def test_skips_prompt_when_assessment_missing(self):
+        finalize, namespace = self._load_finalize_function()
+        session = self._session()
+
+        finalize(session, None, {"intake": {}}, None)
+
+        namespace["input"].assert_not_called()
+        namespace["update_status"].assert_not_called()
+        namespace["_run_delivery_workflow"].assert_not_called()
+
+    def test_declined_leaves_status_unchanged(self):
+        finalize, namespace = self._load_finalize_function()
+        session = self._session()
+        assessment = mock.Mock()
+        intake = {"intake": {}}
+        recovery_result = {"success": True}
+        namespace["input"].return_value = "n"
+
+        finalize(session, assessment, intake, recovery_result)
+
+        namespace["update_status"].assert_not_called()
+        namespace["log_operator"].assert_not_called()
+        namespace["_run_delivery_workflow"].assert_not_called()
+
+    def test_accepted_updates_status_runs_delivery_and_displays_confirmation(self):
+        finalize, namespace = self._load_finalize_function()
+        session = self._session()
+        assessment = mock.Mock()
+        intake = {"intake": {}}
+        recovery_result = {"success": True}
+        namespace["input"].return_value = "y"
+
+        finalize(session, assessment, intake, recovery_result)
+
+        namespace["update_status"].assert_called_once_with(
+            session,
+            "COMPLETED",
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+        namespace["log_operator"].assert_called_once_with(
+            session,
+            "SENTINEL",
+            "Recovery finalization approved.",
+        )
+        namespace["_run_delivery_workflow"].assert_called_once_with(
+            session,
+            assessment,
+            intake,
+            recovery_result=recovery_result,
+        )
+        printed_args = [
+            call.args[0]
+            for call in namespace["print"].call_args_list
+            if call.args
+        ]
+        self.assertIn("delivery.label.finalized", printed_args)
+
+    def test_finalize_prompt_i18n_strings(self):
+        set_language("en", persist=False)
+        self.assertEqual(
+            tr("delivery.prompt.finalize"),
+            "Finalize recovery work? [y/N]:",
+        )
+        self.assertEqual(
+            tr("delivery.label.finalized"),
+            "Recovery work finalized. Case status is now COMPLETED.",
+        )
+
+        set_language("de", persist=False)
+        self.assertEqual(
+            tr("delivery.prompt.finalize"),
+            "Wiederherstellungsarbeit abschliessen? [j/N]:",
+        )
+        self.assertEqual(
+            tr("delivery.label.finalized"),
+            "Wiederherstellungsarbeit abgeschlossen. Fallstatus ist jetzt COMPLETED.",
+        )
+
+
+class RouteCaseFinalizedTests(unittest.TestCase):
+    def _recovery_status(self):
+        return type(
+            "RecoveryStatus",
+            (),
+            {
+                "NEW": "NEW",
+                "ASSESSING": "ASSESSING",
+                "AWAITING_CUSTOMER_RESPONSE": "AWAITING_CUSTOMER_RESPONSE",
+                "READY_FOR_IMAGING": "READY_FOR_IMAGING",
+                "IMAGING": "IMAGING",
+                "READY_FOR_RECOVERY": "READY_FOR_RECOVERY",
+                "RECOVERING": "RECOVERING",
+                "ON_HOLD": "ON_HOLD",
+                "COMPLETED": "COMPLETED",
+                "CANCELLED": "CANCELLED",
+            },
+        )()
+
+    def _load_route_case(self, **overrides):
+        namespace = {
+            "log_warning": mock.Mock(),
+            "log_info": mock.Mock(),
+            "log_error": mock.Mock(),
+            "log_operator": mock.Mock(),
+            "tr": lambda key, **kwargs: key,
+            "print": mock.Mock(),
+            "input": mock.Mock(),
+            "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
+            "_run_delivery_workflow": mock.Mock(),
+            "resolve_resume_status": mock.Mock(
+                return_value="READY_FOR_RECOVERY",
+            ),
+            "_require_assessment": mock.Mock(
+                side_effect=lambda session, assessment, workflow_name: assessment
+            ),
+            "update_status": mock.Mock(),
+            "RecoveryStatus": self._recovery_status(),
+            "collect_case_intake": mock.Mock(),
+            "_run_assessment_pipeline": mock.Mock(),
+            "_finish_session": mock.Mock(),
+            "classify_acquisition_state": mock.Mock(),
+            "create_strategy": mock.Mock(return_value=mock.Mock()),
+            "_run_acquisition_workflow": mock.Mock(),
+            "_run_recovery_method_selection": mock.Mock(
+                return_value=(None, False, True),
+            ),
+        }
+        namespace.update(overrides)
+        route_case = _load_sentinel_function("route_case", namespace)
+        return route_case, namespace
+
+    def _session(self, *, status="COMPLETED"):
+        session = mock.Mock()
+        session.status = status
+        session.session_id = "REC-2026-000001"
+        session.case_name = "Test Case"
+        session.recovery_path = "/tmp/recovery"
+        session.source_device = mock.Mock()
+        return session
+
+    def test_completed_case_runs_delivery_workflow_before_reopen(self):
+        route_case, namespace = self._load_route_case()
+        session = self._session(status="COMPLETED")
+        intake = {"intake": {}}
+        assessment = mock.Mock()
+        namespace["input"].return_value = "n"
+
+        route_case(session, intake, assessment, [], [])
+
+        namespace["_run_delivery_workflow"].assert_called_once_with(
+            session,
+            assessment,
+            intake,
+            recovery_result=None,
+        )
+        namespace["log_operator"].assert_called_with(
+            session,
+            "SENTINEL",
+            "Case reopen declined.",
+        )
+        namespace["update_status"].assert_not_called()
+
+    def test_completed_case_reopen_path_still_updates_status(self):
+        route_case, namespace = self._load_route_case()
+        session = self._session(status="COMPLETED")
+        intake = {"intake": {}}
+        assessment = mock.Mock()
+        namespace["input"].return_value = "y"
+
+        route_case(session, intake, assessment, [], [])
+
+        namespace["_run_delivery_workflow"].assert_called_once_with(
+            session,
+            assessment,
+            intake,
+            recovery_result=None,
+        )
+        namespace["log_operator"].assert_any_call(
+            session,
+            "SENTINEL",
+            "Case reopen approved.",
+        )
+        namespace["update_status"].assert_called_once_with(
+            session,
+            "READY_FOR_RECOVERY",
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+        namespace["_run_recovery_method_selection"].assert_called_once()
+
+    def test_cancelled_case_does_not_run_delivery_workflow(self):
+        route_case, namespace = self._load_route_case()
+        session = self._session(status="CANCELLED")
+        intake = {"intake": {}}
+        assessment = mock.Mock()
+        namespace["input"].return_value = "n"
+
+        route_case(session, intake, assessment, [], [])
+
+        namespace["_run_delivery_workflow"].assert_not_called()
+        namespace["log_operator"].assert_called_with(
+            session,
+            "SENTINEL",
+            "Case reopen declined.",
+        )
+        namespace["update_status"].assert_not_called()
 
 
 if __name__ == "__main__":

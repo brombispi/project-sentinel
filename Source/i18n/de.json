@@ -245,6 +245,9 @@
     "report.prompt.generate": "Technikerbericht erstellen? [j/N]:",
     "report.label.saved_path": "Technikerbericht gespeichert: {path}",
 
+    "delivery.prompt.finalize": "Wiederherstellungsarbeit abschliessen? [j/N]:",
+    "delivery.label.finalized": "Wiederherstellungsarbeit abgeschlossen. Fallstatus ist jetzt COMPLETED.",
+
     "route.label.recovery_case": "Wiederherstellungsfall :",
     "route.label.case_name": "Fallname              :",
     "route.label.case_location": "Fallpfad              :",
