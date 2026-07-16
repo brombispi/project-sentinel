@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import sys
@@ -17,6 +18,7 @@ from i18n.translator import (
     config_path,
     get_language,
     init_language,
+    operator_message,
     read_config_language,
     set_language,
     tr,
@@ -28,6 +30,23 @@ CASE_LOADER_SOURCE = (SOURCE_ROOT / "modules" / "case_loader.py").read_text(
 SENTINEL_SOURCE = (SOURCE_ROOT / "bin" / "sentinel").read_text(
     encoding="utf-8"
 )
+
+
+def _extract_sentinel_function(function_name):
+    module = ast.parse(SENTINEL_SOURCE)
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            segment = ast.get_source_segment(SENTINEL_SOURCE, node)
+            if segment is None:
+                raise ValueError(f"Could not extract {function_name}")
+            return segment
+    raise ValueError(f"Function {function_name} not found in sentinel")
+
+
+def _load_sentinel_function(function_name, namespace=None):
+    namespace = {} if namespace is None else namespace
+    exec(_extract_sentinel_function(function_name), namespace)
+    return namespace[function_name]
 
 
 def _log_case_load_failure_for_test(session, load_result, log_warning, log_error):
@@ -179,6 +198,97 @@ class TranslatorTests(unittest.TestCase):
         rendered = tr("case.list.status", status="READY_FOR_IMAGING")
         self.assertIn("READY_FOR_IMAGING", rendered)
         self.assertNotIn("BEREIT", rendered)
+
+    def test_phase2_german_workflow_strings_contain_umlauts(self):
+        set_language("de", persist=False)
+        samples = (
+            tr("imaging.refused.title"),
+            tr("validation.invalid_selection"),
+            tr("device.source.title"),
+            tr("summary.complete"),
+        )
+        combined = " ".join(samples)
+        self.assertRegex(combined, r"[äöüÄÖÜ]")
+
+    def test_phase2_operator_message_uses_code_not_english_message(self):
+        set_language("de", persist=False)
+        rendered = operator_message(
+            {
+                "code": "SOURCE_NOT_CONNECTED",
+                "message": "Source device is not connected or could not be matched using case.json.",
+                "display_args": {"identity_source": "case.json"},
+            },
+            "load",
+        )
+        self.assertIn("case.json", rendered)
+        self.assertNotEqual(
+            rendered,
+            "Source device is not connected or could not be matched using case.json.",
+        )
+
+    def test_phase2_archive_operator_message_placeholder(self):
+        set_language("de", persist=False)
+        rendered = operator_message(
+            {
+                "code": "RELOCATE_SUCCESS",
+                "message": "Recovery case relocated to /mnt/backup/Recoveries/REC-2026-000001",
+                "display_args": {
+                    "dest_path": "/mnt/backup/Recoveries/REC-2026-000001",
+                },
+            },
+            "archive",
+        )
+        self.assertIn("/mnt/backup/Recoveries/REC-2026-000001", rendered)
+
+    def test_json_packs_load_as_utf8(self):
+        de_text = (I18N_DIR / "de.json").read_text(encoding="utf-8")
+        self.assertIn("Grösse", de_text)
+        self.assertIn("Sprache wählen", de_text)
+
+    def test_sentinel_does_not_pass_translated_strings_to_log_calls(self):
+        self.assertNotRegex(
+            SENTINEL_SOURCE,
+            r"log_(info|error|warning|operator)\([^)]*tr\(",
+        )
+
+    def test_sentinel_does_not_branch_on_translated_text(self):
+        self.assertNotIn('if tr("', SENTINEL_SOURCE)
+        self.assertNotIn("== tr(", SENTINEL_SOURCE)
+
+
+class SentinelLocalizationRegressionTests(unittest.TestCase):
+    def test_confirmed_yes_accepts_localized_affirmatives(self):
+        confirmed_yes = _load_sentinel_function("_confirmed_yes")
+
+        for value in ("y", "Y", "j", "J", " y ", "  J  "):
+            with self.subTest(value=value):
+                self.assertTrue(confirmed_yes(value))
+
+        for value in ("n", ""):
+            with self.subTest(value=value):
+                self.assertFalse(confirmed_yes(value))
+
+    def test_prompt_startup_menu_redraws_after_language_selection(self):
+        namespace = {
+            "tr": lambda key, **kwargs: key,
+            "get_language": lambda: "en",
+            "_language_display_name": lambda code: code,
+            "print": mock.Mock(),
+        }
+        _load_sentinel_function("_print_startup_menu", namespace)
+        _load_sentinel_function("_prompt_startup_menu", namespace)
+
+        print_menu = mock.Mock()
+        prompt_language = mock.Mock()
+        namespace["_print_startup_menu"] = print_menu
+        namespace["_prompt_language_selection"] = prompt_language
+
+        with mock.patch("builtins.input", side_effect=["l", "c"]):
+            result = namespace["_prompt_startup_menu"]()
+
+        self.assertEqual(result, "cancel")
+        self.assertEqual(print_menu.call_count, 2)
+        prompt_language.assert_called_once()
 
 
 class CaseLoaderCodeTests(unittest.TestCase):

@@ -12,6 +12,7 @@ sys.path.append(str(PROJECT_ROOT))
 
 from core.device import Device
 from core.codex import Codex
+from i18n import init_language, tr
 from modules.aegis import evaluate
 from modules.storage_query import (
     find_mounted_descendants,
@@ -188,6 +189,20 @@ def get_filesystem_knowledge(codex, filesystem_text):
             })
 
     return knowledge_items
+
+
+def _display_codex_value(value):
+    if isinstance(value, str) and value.startswith("codex."):
+        return tr(value)
+    return value
+
+
+def _display_assessment_information(info):
+    if ": " not in info:
+        return _display_codex_value(info)
+
+    prefix, _, remainder = info.partition(": ")
+    return f"{prefix}: {_display_codex_value(remainder)}"
 
 
 OVERALL_HEALTH_PATTERN = re.compile(
@@ -424,6 +439,8 @@ def detect_devices():
 
 if __name__ == "__main__":
 
+    init_language(PROJECT_ROOT)
+
     print("=" * 50)
     print("ARGUS")
     print("Device Detection Engine")
@@ -455,13 +472,16 @@ if __name__ == "__main__":
                 print(f"- Filesystem: {filesystem}")
 
                 if "warning" in knowledge:
-                    print(f"  Warning: {knowledge['warning']}")
+                    print(f"  Warning: {_display_codex_value(knowledge['warning'])}")
 
                 if "risk" in knowledge:
-                    print(f"  Risk: {knowledge['risk']}")
+                    print(f"  Risk: {_display_codex_value(knowledge['risk'])}")
 
                 if "recommended_action" in knowledge:
-                    print(f"  Recommended Action: {knowledge['recommended_action']}")
+                    print(
+                        "  Recommended Action: "
+                        f"{_display_codex_value(knowledge['recommended_action'])}"
+                    )
 
         print()
 
@@ -480,18 +500,18 @@ if __name__ == "__main__":
             print()
             print("Warnings")
             for warning in assessment.warnings:
-                print(f"- {warning}")
+                print(f"- {_display_codex_value(warning)}")
 
         if assessment.information:
             print()
             print("Information")
             for info in assessment.information:
-                print(f"- {info}")
+                print(f"- {_display_assessment_information(info)}")
 
         if assessment.recommendations:
             print()
             print("Recommended Actions")
             for recommendation in assessment.recommendations:
-                print(f"- {recommendation}")
+                print(f"- {_display_codex_value(recommendation)}")
 
         print("-" * 50)

@@ -163,3 +163,89 @@ def tr(key, **kwargs):
 def tr_plural(count, stem, **kwargs):
     suffix = "one" if count == 1 else "other"
     return tr(f"{stem}.{suffix}", count=count, **kwargs)
+
+
+def operator_message(result, namespace):
+    """
+    Translate an operator-facing result message by stable code.
+
+    Falls back to the English message when no translation key exists.
+    """
+
+    code = result.get("code")
+    if code:
+        key = f"{namespace}.message.{str(code).lower()}"
+        display_args = result.get("display_args") or {}
+        rendered = tr(key, **display_args)
+        if not rendered.startswith("["):
+            return rendered
+
+    return result.get("message", "")
+
+
+def display_aegis_reason(reason):
+    mapping = {
+        "Target is the Recovery Engine.": "aegis.reason.recovery_engine",
+        "External device.": "aegis.reason.external_device",
+    }
+    key = mapping.get(reason)
+    if key:
+        return tr(key)
+    return reason
+
+
+def display_janus_reason(assessment, mount_point=None):
+    if assessment.approved and mount_point:
+        return tr("janus.reason.approved", mount_point=mount_point)
+
+    mapping = {
+        "Recovery Engine cannot be used as a recovery destination.": (
+            "janus.reason.recovery_engine_destination"
+        ),
+        "Destination is not mounted or has no writable mount point.": (
+            "janus.reason.not_mounted"
+        ),
+    }
+    key = mapping.get(assessment.reason)
+    if key:
+        return tr(key)
+    return assessment.reason
+
+
+def display_smart_warning(warning):
+    mapping = {
+        "smartctl is not installed.": "smart.warning.smartctl_not_installed",
+        "smartctl produced no output.": "smart.warning.no_output",
+    }
+    key = mapping.get(warning)
+    if key:
+        return tr(key)
+    return warning
+
+
+def display_oracle_goal(goal):
+    mapping = {
+        "Protect the original device.": "oracle.goal.protect_device",
+        "Preserve the original device.": "oracle.goal.preserve_device",
+    }
+    key = mapping.get(goal)
+    if key:
+        return tr(key)
+    return goal
+
+
+def display_oracle_step(step, recommendation=None):
+    mapping = {
+        "Do not perform any recovery operation.": "oracle.step.stop_no_recovery",
+        "Create a forensic image.": "oracle.step.create_forensic_image",
+        "Verify image integrity.": "oracle.step.verify_image_integrity",
+        "Perform recovery on the image, not the original device.": (
+            "oracle.step.recover_on_image"
+        ),
+    }
+    key = mapping.get(step)
+    if key:
+        return tr(key)
+    if recommendation is not None and step == recommendation:
+        return tr("oracle.step.recommendation", recommendation=step)
+    return step

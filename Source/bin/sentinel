@@ -197,7 +197,7 @@ def _run_mount_safety_gate(session, devices):
 
     unmount_confirm = input(tr("mount.prompt.unmount")).strip().lower()
 
-    if unmount_confirm != "y":
+    if not _confirmed_yes(unmount_confirm):
         log_operator(
             session,
             "SENTINEL",
@@ -418,7 +418,7 @@ def _run_recovery_method_selection(session, assessment, intake):
 
         recovery_confirm = input(tr("photorec.prompt.proceed")).strip().lower()
 
-        if recovery_confirm == "y":
+        if _confirmed_yes(recovery_confirm):
             update_status(
                 session,
                 RecoveryStatus.RECOVERING,
@@ -614,7 +614,7 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
             tr("imaging.prompt.fingerprint")
         ).strip().lower()
 
-        if fingerprint_confirm == "y":
+        if _confirmed_yes(fingerprint_confirm):
             log_operator(
                 session,
                 "SENTINEL",
@@ -731,7 +731,7 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
 
                     confirm = input(tr("imaging.prompt.resume")).strip().lower()
 
-                    if confirm == "y":
+                    if _confirmed_yes(confirm):
                         update_status(
                             session,
                             RecoveryStatus.IMAGING,
@@ -880,7 +880,7 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
 
                 confirm = input(tr("imaging.prompt.new")).strip().lower()
 
-                if confirm == "y":
+                if _confirmed_yes(confirm):
                     update_status(
                         session,
                         RecoveryStatus.IMAGING,
@@ -1191,6 +1191,7 @@ def _run_assessment_pipeline(session, intake, devices):
     return strategy, smart_result, workflow_results
 
 
+
 def _finish_session(session, assessment, strategy, smart_result, workflow_results):
     print()
     print_summary(
@@ -1207,6 +1208,7 @@ def _finish_session(session, assessment, strategy, smart_result, workflow_result
             "recovery_selection_cancelled"
         ],
     )
+
 
     print("-" * 40)
 
@@ -1307,7 +1309,7 @@ def route_case(
             print(tr("route.status.finalized"))
             reopen_confirm = input(tr("route.prompt.reopen")).strip().lower()
 
-            if reopen_confirm != "y":
+            if not _confirmed_yes(reopen_confirm):
                 log_operator(
                     session,
                     "SENTINEL",
@@ -1362,7 +1364,7 @@ def route_case(
         print(tr("route.status.paused"))
         resume_confirm = input(tr("route.prompt.resume")).strip().lower()
 
-        if resume_confirm != "y":
+        if not _confirmed_yes(resume_confirm):
             log_operator(
                 session,
                 "SENTINEL",
@@ -1556,7 +1558,7 @@ def route_case(
     )
 
 
-def _prompt_startup_menu():
+def _print_startup_menu():
     print(tr("startup.menu.create"))
     print(tr("startup.menu.active"))
     print(tr("startup.menu.archived"))
@@ -1571,6 +1573,10 @@ def _prompt_startup_menu():
     )
     print()
 
+
+def _prompt_startup_menu():
+    _print_startup_menu()
+
     while True:
         choice = input(tr("startup.prompt.select_action")).strip().lower()
 
@@ -1582,10 +1588,7 @@ def _prompt_startup_menu():
             return "archived"
         if choice in ("l", "language"):
             _prompt_language_selection()
-            print("==========================================")
-            print(tr("startup.title"))
-            print("==========================================")
-            print()
+            _print_startup_menu()
             continue
         if choice in ("c", "cancel"):
             return "cancel"

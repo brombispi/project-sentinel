@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
 
 import sys
+from pathlib import Path
 
 sys.path.append("/Users/digirettung/Documents/Project Sentinel/Source")
 
 from core.codex import Codex
+from i18n import init_language, tr
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_i18n_initialized = False
+
+
+def _display_codex_value(value):
+    global _i18n_initialized
+
+    if isinstance(value, str) and value.startswith("codex."):
+        if not _i18n_initialized:
+            init_language(PROJECT_ROOT)
+            _i18n_initialized = True
+        return tr(value)
+
+    return value
 
 
 class Sage:
@@ -35,7 +52,7 @@ class Sage:
 
         for field, value in entry.items():
             label = field.replace("_", " ").title()
-            lines.append(f"{label}: {value}")
+            lines.append(f"{label}: {_display_codex_value(value)}")
 
         return "\n".join(lines)
 
