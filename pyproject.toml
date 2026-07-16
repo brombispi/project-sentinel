@@ -1,0 +1,5 @@
+[project]
+name = "project-sentinel"
+version = "0.1.0"
+description = "Operational data recovery workflow platform for DigiRettung."
+requires-python = ">=3.12"
