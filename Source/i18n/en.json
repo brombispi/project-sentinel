@@ -242,6 +242,8 @@
     "summary.value.ended_normally": "Ended normally",
     "summary.complete": "Assessment Complete",
 
+    "report.prompt.generate": "Generate Technician Report? [y/N]:",
+    "report.label.saved_path": "Technician report saved: {path}",
 
     "route.label.recovery_case": "Recovery Case :",
     "route.label.case_name": "Case Name     :",

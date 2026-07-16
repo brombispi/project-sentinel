@@ -242,6 +242,8 @@
     "summary.value.ended_normally": "Normal beendet",
     "summary.complete": "Bewertung abgeschlossen",
 
+    "report.prompt.generate": "Technikerbericht erstellen? [j/N]:",
+    "report.label.saved_path": "Technikerbericht gespeichert: {path}",
 
     "route.label.recovery_case": "Wiederherstellungsfall :",
     "route.label.case_name": "Fallname              :",

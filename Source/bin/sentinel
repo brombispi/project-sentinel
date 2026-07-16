@@ -27,6 +27,7 @@ from modules.archive import (
     verify_forensic_image,
 )
 from modules.echo import log_info, log_operator, log_warning, log_error
+from modules.hermes import Hermes
 from modules.manifest import ManifestError, read_case_manifest, write_initial_case_manifest
 from modules.session_manager import save_case, update_status
 from modules.intake import collect_case_intake
@@ -1191,6 +1192,30 @@ def _run_assessment_pipeline(session, intake, devices):
     return strategy, smart_result, workflow_results
 
 
+def _offer_technician_report(session, recovery_result):
+    if recovery_result is None or not recovery_result["success"]:
+        return
+
+    report_confirm = input(tr("report.prompt.generate")).strip().lower()
+
+    if not _confirmed_yes(report_confirm):
+        return
+
+    try:
+        report_path = Hermes(session).save_technician_report()
+    except FileExistsError as error:
+        print()
+        print(error)
+        return
+
+    print()
+    print(tr("report.label.saved_path", path=report_path))
+    log_info(
+        session,
+        "HERMES",
+        f"Technician report saved: {report_path}",
+    )
+
 
 def _finish_session(session, assessment, strategy, smart_result, workflow_results):
     print()
@@ -1209,6 +1234,7 @@ def _finish_session(session, assessment, strategy, smart_result, workflow_result
         ],
     )
 
+    _offer_technician_report(session, workflow_results["recovery_result"])
 
     print("-" * 40)
 

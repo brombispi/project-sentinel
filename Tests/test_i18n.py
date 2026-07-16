@@ -344,5 +344,77 @@ class CaseLoaderCodeTests(unittest.TestCase):
         )
 
 
+class TechnicianReportOfferTests(unittest.TestCase):
+    def _load_offer_function(self):
+        namespace = {
+            "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
+            "tr": lambda key, **kwargs: kwargs.get("path", key),
+            "print": mock.Mock(),
+            "input": mock.Mock(),
+            "log_info": mock.Mock(),
+            "Hermes": mock.Mock(),
+        }
+        offer = _load_sentinel_function(
+            "_offer_technician_report",
+            namespace,
+        )
+        return offer, namespace
+
+    def test_skips_prompt_when_recovery_not_successful(self):
+        offer, namespace = self._load_offer_function()
+        session = mock.Mock()
+
+        for recovery_result in (None, {"success": False}):
+            with self.subTest(recovery_result=recovery_result):
+                namespace["input"].reset_mock()
+                offer(session, recovery_result)
+                namespace["input"].assert_not_called()
+
+    def test_declined_does_not_generate_report(self):
+        offer, namespace = self._load_offer_function()
+        session = mock.Mock()
+        namespace["input"].return_value = "n"
+
+        offer(session, {"success": True})
+
+        namespace["Hermes"].assert_not_called()
+        namespace["log_info"].assert_not_called()
+
+    def test_accepted_saves_report_and_logs(self):
+        offer, namespace = self._load_offer_function()
+        session = mock.Mock()
+        report_path = Path("/tmp/recovery/reports/technician_report.md")
+        namespace["input"].return_value = "y"
+        namespace["Hermes"].return_value.save_technician_report.return_value = (
+            report_path
+        )
+
+        offer(session, {"success": True})
+
+        namespace["Hermes"].assert_called_once_with(session)
+        namespace["Hermes"].return_value.save_technician_report.assert_called_once_with()
+        namespace["log_info"].assert_called_once_with(
+            session,
+            "HERMES",
+            f"Technician report saved: {report_path}",
+        )
+
+    def test_existing_report_displays_error_without_crashing(self):
+        offer, namespace = self._load_offer_function()
+        session = mock.Mock()
+        namespace["input"].return_value = "y"
+        namespace["Hermes"].return_value.save_technician_report.side_effect = (
+            FileExistsError(
+                "Technician report already exists: "
+                "/tmp/recovery/reports/technician_report.md"
+            )
+        )
+
+        offer(session, {"success": True})
+
+        namespace["print"].assert_called()
+        namespace["log_info"].assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
