@@ -124,6 +124,10 @@ SHA256_FILENAME = "source.sha256"
 ACQUISITION_SOURCE_FILENAME = "acquisition_source.json"
 
 
+class AcquisitionSourceError(Exception):
+    """Raised when acquisition_source.json cannot be read or validated."""
+
+
 def _artifact_paths(recovery_path):
     recovery_path = Path(recovery_path)
     images_dir = recovery_path / "images"
@@ -219,13 +223,55 @@ def _serial_is_trustworthy(serial):
     return normalized not in ("", "Unknown", "unknown", "N/A", "n/a")
 
 
+def _parse_acquisition_source_payload(acquisition_source_path):
+    acquisition_source_path = Path(acquisition_source_path)
+
+    try:
+        payload = json.loads(
+            acquisition_source_path.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as error:
+        raise AcquisitionSourceError(
+            f"acquisition_source.json is malformed: {acquisition_source_path}"
+        ) from error
+    except OSError as error:
+        raise AcquisitionSourceError(
+            f"acquisition_source.json could not be read: {acquisition_source_path}"
+        ) from error
+
+    if not isinstance(payload, dict):
+        raise AcquisitionSourceError(
+            "acquisition_source.json must contain a JSON object: "
+            f"{acquisition_source_path}"
+        )
+
+    return payload
+
+
+def read_acquisition_source(recovery_path):
+    """
+    Read persisted acquisition-source evidence for a recovery case.
+
+    Read-only. Does not repair or rewrite evidence.
+    """
+
+    acquisition_source_path = _artifact_paths(recovery_path)[
+        "acquisition_source_path"
+    ]
+
+    if not acquisition_source_path.is_file():
+        return None
+
+    return _parse_acquisition_source_payload(acquisition_source_path)
+
+
 def _load_acquisition_source(acquisition_source_path):
     if not acquisition_source_path.is_file():
         return None
 
     try:
-        return json.loads(acquisition_source_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return _parse_acquisition_source_payload(acquisition_source_path)
+    except AcquisitionSourceError:
         return None
 
 
