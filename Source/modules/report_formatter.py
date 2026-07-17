@@ -12,16 +12,34 @@ class ReportFormatter:
     Presentation utilities for report output.
     """
 
-    def format_markdown(self, title: str, report: dict) -> str:
+    def format_markdown(self, title: str, report: dict, *, section_order=()) -> str:
         """
-        Format a report dictionary as Markdown.
+        Format a sectioned report dictionary as Markdown.
+
+        Each top-level key is a section title mapping to a field dictionary.
+        section_order selects which sections to render and in what order.
         """
         lines = [
             f"# {title}",
             "",
         ]
 
-        for key, value in report.items():
-            lines.append(f"{key}: {value}")
+        if section_order:
+            sections = section_order
+        else:
+            sections = report.keys()
+
+        for section_title in sections:
+            fields = report.get(section_title, {})
+            lines.append(f"## {section_title}")
+            lines.append("")
+
+            for key, value in fields.items():
+                lines.append(f"{key}: {value}")
+
+            lines.append("")
+
+        if lines[-1] == "":
+            lines.pop()
 
         return "\n".join(lines)

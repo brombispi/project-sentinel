@@ -1,3 +1,5 @@
+import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -9,90 +11,430 @@ SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from core.session import RecoverySession
-from modules.hermes import Hermes, TECHNICIAN_REPORT_FILENAME
+from modules.archive import IMAGE_FILENAME, MAP_FILENAME, SHA256_FILENAME
+from modules.hermes import (
+    FINGERPRINT_ARTIFACT_RELATIVE_PATH,
+    Hermes,
+    IMAGE_ARTIFACT_RELATIVE_PATH,
+    MAP_ARTIFACT_RELATIVE_PATH,
+    TECHNICIAN_REPORT_FILENAME,
+    TECHNICIAN_REPORT_SECTIONS,
+)
+from modules.manifest import ManifestError
 from modules.report_formatter import ReportFormatter
 
-TECHNICIAN_REPORT_KEYS = (
-    "Case ID",
-    "Case Name",
-    "Status",
-    "Created At",
+FIXED_GENERATED_AT = datetime(2026, 7, 16, 12, 30, 0)
+
+IMAGING_DETAILS_FIELDS = (
+    "Acquisition State",
+    "Acquisition State Code",
+    "Image Present",
+    "Map Present",
+    "Map Status",
+    "Map Current Status",
+    "Image Path",
+    "Map Path",
+)
+
+INTEGRITY_VERIFICATION_FIELDS = (
+    "Fingerprint Present",
+    "Canonical Acquisition Complete",
+    "Fingerprint Path",
+)
+
+INCOMPLETE_DDRESCUE_MAP = (
+    "# Mapfile. Created by GNU ddrescue\n"
+    "# current_pos  current_status  current_pass\n"
+    "0x00000000  ?  1\n"
+    "0x00000000  0x3A9800000  ?\n"
 )
 
 
-def _session(**overrides):
+def _case_dir(temp_dir, session_id="REC-2026-000001"):
+    case_dir = Path(temp_dir) / session_id
+    case_dir.mkdir(parents=True, exist_ok=True)
+    return case_dir
+
+
+def _write_manifest(case_dir, manifest):
+    manifest_path = case_dir / "case.json"
+    manifest_path.write_text(json.dumps(manifest, indent=4) + "\n", encoding="utf-8")
+    return manifest_path
+
+
+def _minimal_manifest(session_id="REC-2026-000001", **overrides):
+    manifest = {
+        "session_id": session_id,
+        "case_name": "",
+        "created_at": "2026-07-16T10:00:00",
+        "status": "NEW",
+    }
+    manifest.update(overrides)
+    return manifest
+
+
+def _populated_manifest(session_id="REC-2026-000001"):
+    return {
+        "session_id": session_id,
+        "case_name": "Customer SSD Recovery",
+        "created_at": "2026-07-16T10:00:00",
+        "status": "COMPLETED",
+        "case_contact": {
+            "name": "Jane Example",
+            "phone": "+49 170 0000000",
+            "email": "jane@example.com",
+        },
+        "intake": {
+            "recovery_request": "Recover family photos",
+            "incident_description": "Drive stopped mounting after power loss",
+            "previous_recovery_attempts": "None",
+            "data_priority": "Photos and documents",
+        },
+        "device": {
+            "path": "/dev/sdb",
+            "model": "Samsung SSD 860",
+            "serial": "S4EWNF0M803123A",
+            "size": "500G",
+            "size_bytes": 500107862016,
+            "transport": "SATA",
+            "filesystem": "ext4",
+            "role": "EXTERNAL DEVICE",
+        },
+        "destination": {
+            "path": "/dev/sdc",
+            "model": "WD Elements",
+            "serial": "WX12AB34CD56",
+            "size": "2T",
+            "size_bytes": 2000398934016,
+            "transport": "USB",
+            "filesystem": "ext4",
+            "role": "EXTERNAL DEVICE",
+        },
+        "assessment": {
+            "decision": "APPROVED",
+            "reason": "External device.",
+            "risk": "LOW",
+            "confidence": 100,
+        },
+    }
+
+
+def _session(case_dir, **overrides):
     values = {
-        "session_id": "REC-2026-000001",
+        "session_id": case_dir.name,
         "created_at": datetime(2026, 7, 16, 10, 0, 0),
-        "status": "active",
-        "recovery_path": "/tmp/recovery",
-        "case_name": "Test Case",
+        "status": "NEW",
+        "recovery_path": str(case_dir),
+        "case_name": "",
     }
     values.update(overrides)
     return RecoverySession(**values)
 
 
+def _write_incomplete_acquisition_artifacts(case_dir):
+    images_dir = case_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / IMAGE_FILENAME).write_bytes(b"\x00")
+    (images_dir / MAP_FILENAME).write_text(INCOMPLETE_DDRESCUE_MAP, encoding="utf-8")
+
+
+def _write_canonical_acquisition_artifacts(case_dir):
+    images_dir = case_dir / "images"
+    evidence_dir = case_dir / "evidence"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / IMAGE_FILENAME).write_bytes(b"\x00")
+    (images_dir / MAP_FILENAME).write_bytes(b"\x00")
+    (evidence_dir / SHA256_FILENAME).write_text(
+        "algorithm=SHA-256\n"
+        "digest=abc123\n"
+        "image=source.img\n"
+        "size_bytes=1\n"
+        "timestamp=2026-07-16 10:00:00\n",
+        encoding="utf-8",
+    )
+
+
 class HermesTests(unittest.TestCase):
-    def test_build_technician_report_returns_display_ready_keys_in_order(self):
-        hermes = Hermes(_session())
+    def setUp(self):
+        self.datetime_patcher = mock.patch(
+            "modules.hermes.datetime",
+            wraps=datetime,
+        )
+        self.mock_datetime = self.datetime_patcher.start()
+        self.mock_datetime.now.return_value = FIXED_GENERATED_AT
 
-        report = hermes.build_technician_report()
+    def tearDown(self):
+        self.datetime_patcher.stop()
 
-        self.assertEqual(list(report.keys()), list(TECHNICIAN_REPORT_KEYS))
+    def test_build_technician_report_returns_sections_in_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(list(report.keys()), list(TECHNICIAN_REPORT_SECTIONS))
+
+    def test_build_technician_report_fully_populated_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _populated_manifest())
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(report["Case Information"]["Case Number"], "REC-2026-000001")
+            self.assertEqual(
+                report["Case Information"]["Case Name"],
+                "Customer SSD Recovery",
+            )
+            self.assertEqual(
+                report["Case Information"]["Creation Date"],
+                "2026-07-16T10:00:00",
+            )
+            self.assertEqual(report["Case Information"]["Current Status"], "COMPLETED")
+            self.assertEqual(
+                report["Case Information"]["Report Generation Date"],
+                FIXED_GENERATED_AT,
+            )
+
+            self.assertEqual(report["Customer Information"]["Name"], "Jane Example")
+            self.assertEqual(
+                report["Customer Information"]["Telephone"],
+                "+49 170 0000000",
+            )
+            self.assertEqual(
+                report["Customer Information"]["Email"],
+                "jane@example.com",
+            )
+
+            self.assertEqual(
+                report["Intake Summary"]["Requested Recovery"],
+                "Recover family photos",
+            )
+            self.assertEqual(
+                report["Intake Summary"]["Incident Description"],
+                "Drive stopped mounting after power loss",
+            )
+            self.assertEqual(
+                report["Intake Summary"]["Previous Recovery Attempts"],
+                "None",
+            )
+            self.assertEqual(
+                report["Intake Summary"]["Data Priority"],
+                "Photos and documents",
+            )
+
+            self.assertEqual(report["Device Identity"]["Source Path"], "/dev/sdb")
+            self.assertEqual(
+                report["Device Identity"]["Source Model"],
+                "Samsung SSD 860",
+            )
+            self.assertEqual(
+                report["Device Identity"]["Destination Path"],
+                "/dev/sdc",
+            )
+
+            self.assertEqual(report["Assessment Results"]["Decision"], "APPROVED")
+            self.assertEqual(report["Assessment Results"]["Reason"], "External device.")
+            self.assertEqual(report["Assessment Results"]["Risk"], "LOW")
+            self.assertEqual(report["Assessment Results"]["Confidence"], 100)
+
+    def test_build_technician_report_missing_manifest_raises_manifest_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            hermes = Hermes(_session(case_dir))
+
+            with self.assertRaises(ManifestError) as context:
+                hermes.build_technician_report()
+
+            self.assertIn("case.json not found", str(context.exception))
+
+    def test_build_technician_report_malformed_manifest_raises_manifest_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            (case_dir / "case.json").write_text("{not valid json", encoding="utf-8")
+            hermes = Hermes(_session(case_dir))
+
+            with self.assertRaises(ManifestError) as context:
+                hermes.build_technician_report()
+
+            self.assertIn("case.json is malformed", str(context.exception))
+
+    def test_build_technician_report_missing_optional_sections_become_none(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(report["Case Information"]["Case Number"], "REC-2026-000001")
+            self.assertIsNone(report["Case Information"]["Case Name"])
+
+            self.assertIsNone(report["Customer Information"]["Name"])
+            self.assertIsNone(report["Customer Information"]["Telephone"])
+            self.assertIsNone(report["Customer Information"]["Email"])
+
+            self.assertIsNone(report["Intake Summary"]["Requested Recovery"])
+            self.assertIsNone(report["Intake Summary"]["Incident Description"])
+            self.assertIsNone(report["Intake Summary"]["Previous Recovery Attempts"])
+            self.assertIsNone(report["Intake Summary"]["Data Priority"])
+
+            self.assertIsNone(report["Device Identity"]["Source Path"])
+            self.assertIsNone(report["Device Identity"]["Destination Path"])
+
+            self.assertIsNone(report["Assessment Results"]["Decision"])
+            self.assertIsNone(report["Assessment Results"]["Reason"])
+            self.assertIsNone(report["Assessment Results"]["Risk"])
+            self.assertIsNone(report["Assessment Results"]["Confidence"])
+
+            imaging = report["Imaging Details"]
+            self.assertEqual(imaging["Acquisition State"], "no_acquisition")
+            self.assertEqual(
+                imaging["Acquisition State Code"],
+                "ACQUISITION_NO_ARTIFACTS",
+            )
+            self.assertFalse(imaging["Image Present"])
+            self.assertFalse(imaging["Map Present"])
+            self.assertIsNone(imaging["Map Status"])
+            self.assertIsNone(imaging["Map Current Status"])
+            self.assertEqual(imaging["Image Path"], IMAGE_ARTIFACT_RELATIVE_PATH)
+            self.assertEqual(imaging["Map Path"], MAP_ARTIFACT_RELATIVE_PATH)
+
+            integrity = report["Integrity Verification"]
+            self.assertFalse(integrity["Fingerprint Present"])
+            self.assertFalse(integrity["Canonical Acquisition Complete"])
+            self.assertEqual(
+                integrity["Fingerprint Path"],
+                FINGERPRINT_ARTIFACT_RELATIVE_PATH,
+            )
 
     def test_build_technician_report_empty_values_become_none(self):
-        hermes = Hermes(
-            _session(
-                session_id="",
-                case_name="",
-                status="",
-                created_at=None,
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    case_name="",
+                    case_contact={"name": " ", "phone": "", "email": ""},
+                    intake={
+                        "recovery_request": "",
+                        "incident_description": " ",
+                        "previous_recovery_attempts": "",
+                        "data_priority": "",
+                    },
+                ),
             )
-        )
 
-        report = hermes.build_technician_report()
+            report = Hermes(_session(case_dir)).build_technician_report()
 
-        self.assertIsNone(report["Case ID"])
-        self.assertIsNone(report["Case Name"])
-        self.assertIsNone(report["Status"])
-        self.assertIsNone(report["Created At"])
+            self.assertIsNone(report["Case Information"]["Case Name"])
+            self.assertIsNone(report["Customer Information"]["Name"])
+            self.assertIsNone(report["Intake Summary"]["Requested Recovery"])
+            self.assertIsNone(report["Intake Summary"]["Incident Description"])
+
+    def test_build_technician_report_prefers_persisted_manifest_over_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir, session_id="REC-MANIFEST-001")
+            _write_manifest(
+                case_dir,
+                _populated_manifest(session_id="REC-MANIFEST-001"),
+            )
+
+            session = _session(
+                case_dir,
+                session_id="REC-SESSION-999",
+                case_name="Session Case Name",
+                status="NEW",
+                created_at=datetime(2020, 1, 1, 0, 0, 0),
+            )
+
+            report = Hermes(session).build_technician_report()
+
+            self.assertEqual(
+                report["Case Information"]["Case Number"],
+                "REC-MANIFEST-001",
+            )
+            self.assertEqual(
+                report["Case Information"]["Case Name"],
+                "Customer SSD Recovery",
+            )
+            self.assertEqual(
+                report["Case Information"]["Creation Date"],
+                "2026-07-16T10:00:00",
+            )
+            self.assertEqual(report["Case Information"]["Current Status"], "COMPLETED")
+            self.assertEqual(report["Customer Information"]["Name"], "Jane Example")
+            self.assertEqual(report["Assessment Results"]["Decision"], "APPROVED")
+
+    def test_build_technician_markdown_includes_section_headings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            markdown = Hermes(_session(case_dir)).build_technician_markdown()
+
+            self.assertTrue(markdown.startswith("# Technician Report\n"))
+            for section_title in TECHNICIAN_REPORT_SECTIONS:
+                self.assertIn(f"## {section_title}", markdown)
+
+            self.assertIn("Case Number: REC-2026-000001", markdown)
+            self.assertIn(
+                f"Report Generation Date: {FIXED_GENERATED_AT}",
+                markdown,
+            )
 
     def test_build_report_technician_dispatches_to_technician_report(self):
-        hermes = Hermes(_session())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            hermes = Hermes(_session(case_dir))
 
-        self.assertEqual(
-            hermes.build_report("technician"),
-            hermes.build_technician_report(),
-        )
+            self.assertEqual(
+                hermes.build_report("technician"),
+                hermes.build_technician_report(),
+            )
 
     def test_build_report_unsupported_type_raises_value_error(self):
-        hermes = Hermes(_session())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            hermes = Hermes(_session(case_dir))
 
-        with self.assertRaises(ValueError):
-            hermes.build_report("unknown")
+            with self.assertRaises(ValueError):
+                hermes.build_report("unknown")
 
     def test_build_technician_markdown_delegates_to_report_formatter(self):
-        hermes = Hermes(_session())
-        report = hermes.build_technician_report()
-        real_formatter = ReportFormatter()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            hermes = Hermes(_session(case_dir))
+            report = hermes.build_technician_report()
+            real_formatter = ReportFormatter()
 
-        with mock.patch(
-            "modules.hermes.ReportFormatter",
-            return_value=real_formatter,
-        ) as formatter_cls:
-            result = hermes.build_technician_markdown()
+            with mock.patch(
+                "modules.hermes.ReportFormatter",
+                return_value=real_formatter,
+            ) as formatter_cls:
+                result = hermes.build_technician_markdown()
 
-        formatter_cls.assert_called_once_with()
-        expected = real_formatter.format_markdown("Technician Report", report)
-        self.assertEqual(result, expected)
+            formatter_cls.assert_called_once_with()
+            expected = real_formatter.format_markdown(
+                "Technician Report",
+                report,
+                section_order=TECHNICIAN_REPORT_SECTIONS,
+            )
+            self.assertEqual(result, expected)
 
     def test_save_technician_report_writes_markdown_and_returns_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            hermes = Hermes(_session(recovery_path=temp_dir))
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            hermes = Hermes(_session(case_dir))
 
             report_path = hermes.save_technician_report()
 
-            expected_path = Path(temp_dir) / "reports" / TECHNICIAN_REPORT_FILENAME
+            expected_path = case_dir / "reports" / TECHNICIAN_REPORT_FILENAME
             self.assertEqual(report_path, expected_path)
             self.assertTrue(report_path.is_file())
             self.assertEqual(
@@ -102,19 +444,119 @@ class HermesTests(unittest.TestCase):
 
     def test_save_technician_report_creates_reports_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            hermes = Hermes(_session(recovery_path=temp_dir))
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            hermes = Hermes(_session(case_dir))
 
             hermes.save_technician_report()
 
-            self.assertTrue((Path(temp_dir) / "reports").is_dir())
+            self.assertTrue((case_dir / "reports").is_dir())
 
     def test_save_technician_report_raises_when_file_already_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            hermes = Hermes(_session(recovery_path=temp_dir))
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            hermes = Hermes(_session(case_dir))
             hermes.save_technician_report()
 
             with self.assertRaises(FileExistsError):
                 hermes.save_technician_report()
+
+    def test_build_technician_report_incomplete_acquisition(self):
+        if not shutil.which("ddrescuelog"):
+            self.skipTest("ddrescuelog is required to classify incomplete maps")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_incomplete_acquisition_artifacts(case_dir)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+            imaging = report["Imaging Details"]
+            integrity = report["Integrity Verification"]
+
+            self.assertEqual(imaging["Acquisition State"], "incomplete_ddrescue")
+            self.assertEqual(
+                imaging["Acquisition State Code"],
+                "ACQUISITION_INCOMPLETE_DDRESCUE",
+            )
+            self.assertTrue(imaging["Image Present"])
+            self.assertTrue(imaging["Map Present"])
+            self.assertEqual(imaging["Map Status"], "incomplete")
+            self.assertEqual(imaging["Map Current Status"], "?")
+            self.assertEqual(imaging["Image Path"], IMAGE_ARTIFACT_RELATIVE_PATH)
+            self.assertEqual(imaging["Map Path"], MAP_ARTIFACT_RELATIVE_PATH)
+
+            self.assertFalse(integrity["Fingerprint Present"])
+            self.assertFalse(integrity["Canonical Acquisition Complete"])
+            self.assertEqual(
+                integrity["Fingerprint Path"],
+                FINGERPRINT_ARTIFACT_RELATIVE_PATH,
+            )
+
+    def test_build_technician_report_canonical_acquisition_complete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_canonical_acquisition_artifacts(case_dir)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+            imaging = report["Imaging Details"]
+            integrity = report["Integrity Verification"]
+
+            self.assertEqual(imaging["Acquisition State"], "completed_canonical")
+            self.assertEqual(
+                imaging["Acquisition State Code"],
+                "ACQUISITION_COMPLETED_CANONICAL",
+            )
+            self.assertTrue(imaging["Image Present"])
+            self.assertTrue(imaging["Map Present"])
+            self.assertIsNone(imaging["Map Status"])
+            self.assertIsNone(imaging["Map Current Status"])
+            self.assertEqual(imaging["Image Path"], IMAGE_ARTIFACT_RELATIVE_PATH)
+            self.assertEqual(imaging["Map Path"], MAP_ARTIFACT_RELATIVE_PATH)
+
+            self.assertTrue(integrity["Fingerprint Present"])
+            self.assertTrue(integrity["Canonical Acquisition Complete"])
+            self.assertEqual(
+                integrity["Fingerprint Path"],
+                FINGERPRINT_ARTIFACT_RELATIVE_PATH,
+            )
+
+    def test_build_technician_markdown_imaging_sections_field_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+            markdown = Hermes(_session(case_dir)).build_technician_markdown()
+
+            self.assertEqual(
+                list(report["Imaging Details"].keys()),
+                list(IMAGING_DETAILS_FIELDS),
+            )
+            self.assertEqual(
+                list(report["Integrity Verification"].keys()),
+                list(INTEGRITY_VERIFICATION_FIELDS),
+            )
+
+            imaging_heading = markdown.index("## Imaging Details")
+            integrity_heading = markdown.index("## Integrity Verification")
+            self.assertLess(imaging_heading, integrity_heading)
+
+            imaging_section = markdown[imaging_heading:integrity_heading]
+            imaging_offsets = [
+                imaging_section.index(f"{field}: ")
+                for field in IMAGING_DETAILS_FIELDS
+            ]
+            self.assertEqual(imaging_offsets, sorted(imaging_offsets))
+
+            integrity_section = markdown[integrity_heading:]
+            integrity_offsets = [
+                integrity_section.index(f"{field}: ")
+                for field in INTEGRITY_VERIFICATION_FIELDS
+            ]
+            self.assertEqual(integrity_offsets, sorted(integrity_offsets))
 
 
 if __name__ == "__main__":
