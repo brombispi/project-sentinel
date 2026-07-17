@@ -128,6 +128,10 @@ class AcquisitionSourceError(Exception):
     """Raised when acquisition_source.json cannot be read or validated."""
 
 
+class FingerprintEvidenceError(Exception):
+    """Raised when source.sha256 cannot be read or validated."""
+
+
 def _artifact_paths(recovery_path):
     recovery_path = Path(recovery_path)
     images_dir = recovery_path / "images"
@@ -273,6 +277,101 @@ def _load_acquisition_source(acquisition_source_path):
         return _parse_acquisition_source_payload(acquisition_source_path)
     except AcquisitionSourceError:
         return None
+
+
+def _format_fingerprint_evidence_content(
+    *,
+    algorithm,
+    digest,
+    image_filename,
+    image_size_bytes,
+    timestamp,
+):
+    return (
+        f"algorithm={algorithm}\n"
+        f"digest={digest}\n"
+        f"image={image_filename}\n"
+        f"size_bytes={image_size_bytes}\n"
+        f"timestamp={timestamp}\n"
+    )
+
+
+def _parse_fingerprint_evidence_payload(fingerprint_evidence_path):
+    fingerprint_evidence_path = Path(fingerprint_evidence_path)
+
+    try:
+        content = fingerprint_evidence_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise FingerprintEvidenceError(
+            f"source.sha256 could not be read: {fingerprint_evidence_path}"
+        ) from error
+
+    fields = {}
+
+    for line_number, line in enumerate(content.splitlines(), start=1):
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+
+        if "=" not in stripped:
+            raise FingerprintEvidenceError(
+                f"source.sha256 is malformed: {fingerprint_evidence_path} "
+                f"(line {line_number})"
+            )
+
+        key, value = stripped.split("=", 1)
+
+        if key in fields:
+            raise FingerprintEvidenceError(
+                f"source.sha256 contains duplicate field {key!r}: "
+                f"{fingerprint_evidence_path}"
+            )
+
+        fields[key] = value
+
+    required_fields = ("algorithm", "digest", "image", "size_bytes", "timestamp")
+    missing_fields = [
+        field
+        for field in required_fields
+        if field not in fields or not str(fields[field]).strip()
+    ]
+
+    if missing_fields:
+        raise FingerprintEvidenceError(
+            "source.sha256 is missing required fields: "
+            f"{', '.join(missing_fields)} ({fingerprint_evidence_path})"
+        )
+
+    try:
+        image_size_bytes = int(fields["size_bytes"])
+    except ValueError as error:
+        raise FingerprintEvidenceError(
+            f"source.sha256 size_bytes is invalid: {fingerprint_evidence_path}"
+        ) from error
+
+    return {
+        "algorithm": fields["algorithm"],
+        "digest": fields["digest"],
+        "image_filename": fields["image"],
+        "image_size_bytes": image_size_bytes,
+        "timestamp": fields["timestamp"],
+    }
+
+
+def read_fingerprint_evidence(recovery_path):
+    """
+    Read persisted fingerprint evidence for a recovery case.
+
+    Read-only. Does not repair or rewrite evidence.
+    """
+
+    fingerprint_evidence_path = _artifact_paths(recovery_path)["sha256_path"]
+
+    if not fingerprint_evidence_path.is_file():
+        return None
+
+    return _parse_fingerprint_evidence_payload(fingerprint_evidence_path)
 
 
 def validate_source_identity_for_resume(session):
@@ -1020,12 +1119,12 @@ def verify_forensic_image(session):
         return result
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    evidence_content = (
-        f"algorithm=SHA-256\n"
-        f"digest={digest_hex}\n"
-        f"image={IMAGE_FILENAME}\n"
-        f"size_bytes={image_size}\n"
-        f"timestamp={timestamp}\n"
+    evidence_content = _format_fingerprint_evidence_content(
+        algorithm="SHA-256",
+        digest=digest_hex,
+        image_filename=IMAGE_FILENAME,
+        image_size_bytes=image_size,
+        timestamp=timestamp,
     )
 
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
