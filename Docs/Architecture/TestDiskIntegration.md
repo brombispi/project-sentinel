@@ -452,6 +452,34 @@ The following are **configuration**, not fixed application constants:
 The command template and mode are read from configuration/deployment, so the
 same code runs unchanged across these environments.
 
+### Configuration source and field contract
+
+These values are read from the **existing** Sentinel configuration file,
+`state/sentinel_config.json` (the same file and JSON parser used for the
+`language` setting — no second config system), under an optional top-level
+`testdisk` object. The read-only accessor lives beside the language config
+helpers in `Source/i18n/translator.py` (`read_testdisk_config`).
+
+| Field | Required? | Type / values | Default |
+|---|---|---|---|
+| `recovery_account` | **required** | non-empty string | none |
+| `forbidden_groups` | **required** | non-empty list of non-empty strings | none |
+| `privilege_drop_mechanism` | **required** | non-empty string | none |
+| `execution_mode` | **required** | one of `root`, `sudo`, `external` | none |
+| `working_copy_safety_margin_bytes` | optional | non-negative integer | `67108864` (64 MiB) |
+
+**Host-specific values are deployment-owned and must not be committed as
+universal defaults.** The tracked `state/sentinel_config.json` in the repository
+must **not** contain host account names, group names, drop tools, or modes
+(e.g. `sentinel-recovery`, `setpriv`, `sudo`, `disk`); these are provisioned per
+host (§11/§12) and `state/` is excluded from deployment sync. The accessor
+therefore ships **no** application defaults for the required fields: a missing
+`testdisk` block, a missing/blank/wrong-typed required field, an unsupported
+mode, malformed JSON, or a negative margin all yield either `None` (not
+configured) or a structured error, and the caller **fails closed** — it never
+substitutes a host value. Only the safety margin (a conservative headroom, not a
+host value) may default.
+
 ### Fail-closed capability checks (before execution)
 
 Before starting — prerequisite-class, so failure happens **before** `RECOVERING`
