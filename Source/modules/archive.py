@@ -1213,6 +1213,53 @@ def _count_recovered_artifacts(recovered_dir):
     )
 
 
+def _empty_recovered_summary():
+    return {
+        "recovered_file_count": 0,
+        "recovered_directory_count": 0,
+        "recovered_size_bytes": 0,
+        "recup_directories": [],
+        "recovery_present": False,
+    }
+
+
+def summarize_recovered_artifacts(recovery_path):
+    """
+    Summarize observable recovery artifacts under recovered/recup.*.
+
+    Read-only. Does not modify recovery outputs.
+    """
+
+    recovery_path = Path(recovery_path)
+    recovered_dir = recovery_path / "recovered"
+
+    if not recovered_dir.is_dir():
+        return _empty_recovered_summary()
+
+    (
+        recovered_directory_count,
+        recovered_file_count,
+        recovered_size_bytes,
+        recup_dirs,
+    ) = _count_recovered_artifacts(recovered_dir)
+
+    recup_directories = []
+
+    for recup_dir in recup_dirs:
+        recup_path = Path(recup_dir)
+        recup_directories.append(
+            recup_path.relative_to(recovery_path).as_posix()
+        )
+
+    return {
+        "recovered_file_count": recovered_file_count,
+        "recovered_directory_count": recovered_directory_count,
+        "recovered_size_bytes": recovered_size_bytes,
+        "recup_directories": recup_directories,
+        "recovery_present": recovered_directory_count > 0 or recovered_file_count > 0,
+    }
+
+
 def execute_photorec_recovery(session):
     """
     Recover files from the forensic image using PhotoRec.

@@ -14,6 +14,7 @@ from modules.archive import (
     SHA256_FILENAME,
     read_acquisition_source,
     read_fingerprint_evidence,
+    summarize_recovered_artifacts,
 )
 
 VALID_ACQUISITION_SOURCE = {
@@ -134,6 +135,55 @@ class ReadFingerprintEvidenceTests(unittest.TestCase):
                 read_fingerprint_evidence(case_dir)
 
             self.assertIn("source.sha256 is malformed", str(context.exception))
+
+
+EMPTY_RECOVERED_SUMMARY = {
+    "recovered_file_count": 0,
+    "recovered_directory_count": 0,
+    "recovered_size_bytes": 0,
+    "recup_directories": [],
+    "recovery_present": False,
+}
+
+
+def _write_recovered_artifacts(case_dir):
+    recup_dir = case_dir / "recovered" / "recup.1"
+    recup_dir.mkdir(parents=True, exist_ok=True)
+    (recup_dir / "file_a.bin").write_bytes(b"abc")
+    (recup_dir / "nested" / "file_b.bin").parent.mkdir(parents=True, exist_ok=True)
+    (recup_dir / "nested" / "file_b.bin").write_bytes(b"12345")
+
+
+class SummarizeRecoveredArtifactsTests(unittest.TestCase):
+    def test_summarize_recovered_artifacts_returns_populated_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            _write_recovered_artifacts(case_dir)
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result["recovered_directory_count"], 1)
+            self.assertEqual(result["recovered_file_count"], 2)
+            self.assertEqual(result["recovered_size_bytes"], 8)
+            self.assertEqual(result["recup_directories"], ["recovered/recup.1"])
+            self.assertTrue(result["recovery_present"])
+
+    def test_summarize_recovered_artifacts_returns_empty_summary_for_empty_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            (case_dir / "recovered").mkdir()
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result, EMPTY_RECOVERED_SUMMARY)
+
+    def test_summarize_recovered_artifacts_returns_empty_summary_when_directory_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result, EMPTY_RECOVERED_SUMMARY)
 
 
 if __name__ == "__main__":
