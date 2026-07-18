@@ -18,28 +18,51 @@ from modules.archive import (
     MAP_FILENAME,
     SHA256_FILENAME,
 )
+from i18n import get_language, set_language
 from modules.argus import SmartEvidenceError
 from modules.echo import AuditLogError
 from modules.hermes import (
-    CUSTOMER_DISCLAIMER,
-    CUSTOMER_IMAGING_COMPLETED,
-    CUSTOMER_IMAGING_NOT_COMPLETED,
-    CUSTOMER_IMAGING_NOT_PERFORMED,
     CUSTOMER_POLICY_VERSION,
-    CUSTOMER_RECOMMENDATIONS,
-    CUSTOMER_REPORT_FILENAME,
     CUSTOMER_REPORT_SECTIONS,
     FINGERPRINT_ARTIFACT_RELATIVE_PATH,
     Hermes,
     IMAGE_ARTIFACT_RELATIVE_PATH,
     MAP_ARTIFACT_RELATIVE_PATH,
-    TECHNICIAN_REPORT_FILENAME,
     TECHNICIAN_REPORT_SECTIONS,
+    customer_report_filename,
+    technician_report_filename,
 )
 from modules.manifest import ManifestError
 from modules.report_formatter import ReportFormatter
 
 FIXED_GENERATED_AT = datetime(2026, 7, 16, 12, 30, 0)
+
+# English report wording used as test fixtures. These mirror the authoritative
+# English strings in Source/i18n/en.json (the localization tests verify parity),
+# and let these tests assert the exact default-language wording.
+CUSTOMER_IMAGING_COMPLETED = "A complete forensic image of the device was created."
+CUSTOMER_IMAGING_NOT_COMPLETED = "The forensic image of the device was not completed."
+CUSTOMER_IMAGING_NOT_PERFORMED = "No forensic image of the device was created."
+
+CUSTOMER_RECOMMENDATIONS = (
+    "Verify that the recovered data is complete and opens correctly before "
+    "relying on it.",
+    "Contact us if you find missing or unreadable files in the recovered data.",
+    "Keep at least two independent backups of important data in separate "
+    "locations.",
+    "Store recovered data on a different device from the one that was "
+    "recovered.",
+)
+
+CUSTOMER_DISCLAIMER = (
+    "This report summarizes the data recovery work performed for your case.",
+    "Data recovery cannot be guaranteed, and results depend on the condition "
+    "of the device.",
+    "You are responsible for verifying the recovered data and maintaining your "
+    "own backups.",
+    "Recovered data is retained according to our data retention policy and is "
+    "then securely removed.",
+)
 
 IMAGING_DETAILS_FIELDS = (
     "Acquisition State",
@@ -245,6 +268,8 @@ def _write_audit_log(case_dir, lines=()):
 
 class HermesTests(unittest.TestCase):
     def setUp(self):
+        self._previous_language = get_language()
+        set_language("en", persist=False)
         self.datetime_patcher = mock.patch(
             "modules.hermes.datetime",
             wraps=datetime,
@@ -254,6 +279,7 @@ class HermesTests(unittest.TestCase):
 
     def tearDown(self):
         self.datetime_patcher.stop()
+        set_language(self._previous_language, persist=False)
 
     def test_build_technician_report_returns_sections_in_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -543,7 +569,9 @@ class HermesTests(unittest.TestCase):
 
             report_path = hermes.save_technician_report()
 
-            expected_path = case_dir / "reports" / TECHNICIAN_REPORT_FILENAME
+            expected_path = (
+                case_dir / "reports" / technician_report_filename("en")
+            )
             self.assertEqual(report_path, expected_path)
             self.assertTrue(report_path.is_file())
             self.assertEqual(
@@ -1454,6 +1482,8 @@ class HermesTests(unittest.TestCase):
 
 class HermesCustomerReportTests(unittest.TestCase):
     def setUp(self):
+        self._previous_language = get_language()
+        set_language("en", persist=False)
         self.datetime_patcher = mock.patch(
             "modules.hermes.datetime",
             wraps=datetime,
@@ -1463,6 +1493,7 @@ class HermesCustomerReportTests(unittest.TestCase):
 
     def tearDown(self):
         self.datetime_patcher.stop()
+        set_language(self._previous_language, persist=False)
 
     def _completed_manifest(self, session_id="REC-2026-000001", outcome="SUCCESSFUL"):
         manifest = _populated_manifest(session_id)
@@ -1761,7 +1792,7 @@ class HermesCustomerReportTests(unittest.TestCase):
 
             report_path = hermes.save_customer_report()
 
-            expected_path = case_dir / "reports" / CUSTOMER_REPORT_FILENAME
+            expected_path = case_dir / "reports" / customer_report_filename("en")
             self.assertEqual(report_path, expected_path)
             self.assertTrue(report_path.is_file())
             self.assertEqual(

@@ -147,8 +147,24 @@ def set_language(language, persist=True, project_root=None):
     return resolved
 
 
-def tr(key, **kwargs):
-    template = _catalogs.get(_language, {}).get(key)
+def translate(key, language=None, **kwargs):
+    """
+    Translate a key in an explicit language without mutating global state.
+
+    When language is None the current process-global UI language is used
+    (preserving tr() behavior). An unsupported explicit language resolves
+    safely to English. The fallback order is:
+    requested language -> English -> "[key]".
+    """
+
+    if language is None:
+        lang = _language
+    else:
+        lang = _resolve_language(language)
+
+    _ensure_catalog(lang)
+
+    template = _catalogs.get(lang, {}).get(key)
     if template is None:
         template = _catalogs.get(DEFAULT_LANGUAGE, {}).get(key)
     if template is None:
@@ -158,6 +174,10 @@ def tr(key, **kwargs):
         return template.format(**kwargs)
 
     return template
+
+
+def tr(key, **kwargs):
+    return translate(key, None, **kwargs)
 
 
 def tr_plural(count, stem, **kwargs):

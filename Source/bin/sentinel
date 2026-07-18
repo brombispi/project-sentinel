@@ -1145,6 +1145,41 @@ def _run_assessment_pipeline(session, intake, devices):
     return strategy, smart_result, workflow_results
 
 
+def _prompt_report_language():
+    """
+    Prompt the operator for the language of a single report.
+
+    Defaults to the current operator UI language (Enter accepts it). Returns a
+    supported language code without mutating the process-global UI language, so
+    each report can be generated in a different language independently.
+    """
+    default = get_language()
+
+    print()
+    print(tr("report.language.prompt.title"))
+    print(tr("report.language.option.en"))
+    print(tr("report.language.option.de"))
+
+    while True:
+        choice = input(
+            tr(
+                "report.language.prompt.select",
+                default=_language_display_name(default),
+            )
+        ).strip().lower()
+
+        if choice == "":
+            return default
+
+        if choice in ("1", "en"):
+            return "en"
+
+        if choice in ("2", "de"):
+            return "de"
+
+        print(tr("validation.invalid_selection"))
+
+
 def _offer_report_generation(
     session,
     prompt_key,
@@ -1157,8 +1192,10 @@ def _offer_report_generation(
     if not _confirmed_yes(report_confirm):
         return
 
+    language = _prompt_report_language()
+
     try:
-        report_path = save_report()
+        report_path = save_report(language)
     except FileExistsError as error:
         print()
         print(error)
@@ -1181,7 +1218,7 @@ def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None)
         session,
         "report.prompt.generate",
         "report.label.saved_path",
-        lambda: Hermes(session).save_technician_report(),
+        lambda language: Hermes(session, language).save_technician_report(),
         "Technician report saved",
     )
 
@@ -1189,7 +1226,7 @@ def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None)
         session,
         "report.prompt.generate_customer",
         "report.label.saved_path_customer",
-        lambda: Hermes(session).save_customer_report(),
+        lambda language: Hermes(session, language).save_customer_report(),
         "Customer report saved",
     )
 

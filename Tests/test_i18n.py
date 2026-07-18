@@ -199,6 +199,16 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn("READY_FOR_IMAGING", rendered)
         self.assertNotIn("BEREIT", rendered)
 
+    def test_report_keys_present_and_parity(self):
+        en = json.loads((I18N_DIR / "en.json").read_text(encoding="utf-8"))
+        de = json.loads((I18N_DIR / "de.json").read_text(encoding="utf-8"))
+
+        en_report_keys = {key for key in en if key.startswith("report.")}
+        de_report_keys = {key for key in de if key.startswith("report.")}
+
+        self.assertTrue(en_report_keys)
+        self.assertEqual(en_report_keys, de_report_keys)
+
     def test_phase2_german_workflow_strings_contain_umlauts(self):
         set_language("de", persist=False)
         samples = (
@@ -356,6 +366,11 @@ class DeliveryWorkflowTests(unittest.TestCase):
             "input": mock.Mock(),
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
+            # The per-report language prompt is exercised independently in
+            # test_report_localization.py; here it is mocked so these tests
+            # focus on the generate/decline offer flow and stay decoupled from
+            # language selection.
+            "_prompt_report_language": mock.Mock(return_value="en"),
         }
         _load_sentinel_function("_offer_report_generation", namespace)
         delivery = _load_sentinel_function(

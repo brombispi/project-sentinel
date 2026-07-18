@@ -15,6 +15,7 @@ from i18n.translator import (
     set_language,
     tr,
     tr_plural,
+    translate,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "set_language",
     "tr",
     "tr_plural",
+    "translate",
 ]
