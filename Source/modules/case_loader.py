@@ -6,7 +6,11 @@ from core.assessment import Assessment
 from core.decision import Decision
 from core.session import RecoverySession
 from core.status import RecoveryStatus
-from modules.archive import classify_acquisition_state
+from modules.archive import (
+    IDENTITY_MATCHES,
+    classify_acquisition_state,
+    compare_source_identity,
+)
 from modules.case_discovery import (
     enumerate_all_permitted_roots,
     enumerate_permitted_roots,
@@ -14,8 +18,6 @@ from modules.case_discovery import (
 )
 from modules.manifest import ManifestError, read_case_manifest
 from modules.storage_query import get_block_device_size_bytes
-
-TRUSTWORTHY_SERIAL_ABSENT = ("", "Unknown", "unknown", "N/A", "n/a")
 
 # Stable load-result codes for workflow branching. Not displayed to operators.
 CODE_MANIFEST_ERROR = "MANIFEST_ERROR"
@@ -35,11 +37,6 @@ def _normalize_identity_text(value):
         return ""
 
     return str(value).strip()
-
-
-def _serial_is_trustworthy(serial):
-    normalized = _normalize_identity_text(serial)
-    return normalized not in TRUSTWORTHY_SERIAL_ABSENT
 
 
 def _path_under_root(path, root):
@@ -99,37 +96,19 @@ def _load_acquisition_source(recovery_path):
 
 
 def _identity_matches_device(device, identity):
-    size_bytes = get_block_device_size_bytes(device.path)
-    if size_bytes is None:
-        return False
+    current_size = get_block_device_size_bytes(device.path)
 
-    recorded_size = identity.get("size_bytes")
-    if recorded_size is None:
-        return False
-
-    if recorded_size != size_bytes:
-        return False
-
-    recorded_serial = _normalize_identity_text(identity.get("serial"))
-    current_serial = _normalize_identity_text(device.serial)
-    recorded_model = _normalize_identity_text(identity.get("model"))
-    current_model = _normalize_identity_text(device.model)
-
-    recorded_serial_trustworthy = _serial_is_trustworthy(recorded_serial)
-    current_serial_trustworthy = _serial_is_trustworthy(current_serial)
-
-    if recorded_serial_trustworthy and current_serial_trustworthy:
-        if recorded_serial != current_serial:
-            return False
-    elif recorded_serial_trustworthy != current_serial_trustworthy:
-        return False
-    else:
-        return False
-
-    if recorded_model != current_model:
-        return False
-
-    return True
+    return (
+        compare_source_identity(
+            recorded_serial=identity.get("serial"),
+            current_serial=device.serial,
+            recorded_model=identity.get("model"),
+            current_model=device.model,
+            recorded_size=identity.get("size_bytes"),
+            current_size=current_size,
+        )
+        == IDENTITY_MATCHES
+    )
 
 
 def _find_matching_devices(devices, identity):

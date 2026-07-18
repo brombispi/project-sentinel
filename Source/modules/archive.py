@@ -227,6 +227,61 @@ def _serial_is_trustworthy(serial):
     return normalized not in ("", "Unknown", "unknown", "N/A", "n/a")
 
 
+# Stable source-identity comparison codes (single identity authority).
+IDENTITY_MATCHES = "IDENTITY_MATCHES"
+IDENTITY_SIZE_UNDETERMINED = "IDENTITY_SIZE_UNDETERMINED"
+IDENTITY_SIZE_MISMATCH = "IDENTITY_SIZE_MISMATCH"
+IDENTITY_SERIAL_MISMATCH = "IDENTITY_SERIAL_MISMATCH"
+IDENTITY_SERIAL_UNSTABLE = "IDENTITY_SERIAL_UNSTABLE"
+IDENTITY_SERIAL_UNAVAILABLE = "IDENTITY_SERIAL_UNAVAILABLE"
+IDENTITY_MODEL_MISMATCH = "IDENTITY_MODEL_MISMATCH"
+
+
+def compare_source_identity(
+    *,
+    recorded_serial,
+    current_serial,
+    recorded_model,
+    current_model,
+    recorded_size,
+    current_size,
+):
+    """
+    Single identity authority: decide whether a recorded source identity
+    matches a current device using exact size, serial-trust and model rules.
+
+    Returns a stable IDENTITY_* code. IDENTITY_MATCHES means the identities
+    match. Path is intentionally not part of matching; callers handle any
+    path-change signalling themselves.
+    """
+
+    if current_size is None:
+        return IDENTITY_SIZE_UNDETERMINED
+
+    if recorded_size != current_size:
+        return IDENTITY_SIZE_MISMATCH
+
+    recorded_serial_trustworthy = _serial_is_trustworthy(recorded_serial)
+    current_serial_trustworthy = _serial_is_trustworthy(current_serial)
+
+    if recorded_serial_trustworthy and current_serial_trustworthy:
+        if _normalize_identity_text(recorded_serial) != _normalize_identity_text(
+            current_serial
+        ):
+            return IDENTITY_SERIAL_MISMATCH
+    elif recorded_serial_trustworthy != current_serial_trustworthy:
+        return IDENTITY_SERIAL_UNSTABLE
+    else:
+        return IDENTITY_SERIAL_UNAVAILABLE
+
+    if _normalize_identity_text(recorded_model) != _normalize_identity_text(
+        current_model
+    ):
+        return IDENTITY_MODEL_MISMATCH
+
+    return IDENTITY_MATCHES
+
+
 def _parse_acquisition_source_payload(acquisition_source_path):
     acquisition_source_path = Path(acquisition_source_path)
 
@@ -374,6 +429,31 @@ def read_fingerprint_evidence(recovery_path):
     return _parse_fingerprint_evidence_payload(fingerprint_evidence_path)
 
 
+_RESUME_IDENTITY_MESSAGES = {
+    IDENTITY_SIZE_UNDETERMINED: (
+        "Resume refused: current source size could not be determined."
+    ),
+    IDENTITY_SIZE_MISMATCH: (
+        "Resume refused: source size_bytes does not match "
+        "acquisition_source.json."
+    ),
+    IDENTITY_SERIAL_MISMATCH: (
+        "Resume refused: source serial does not match "
+        "acquisition_source.json."
+    ),
+    IDENTITY_SERIAL_UNSTABLE: (
+        "Resume refused: serial identity is missing or unstable."
+    ),
+    IDENTITY_SERIAL_UNAVAILABLE: (
+        "Resume refused: trustworthy serial identity is unavailable."
+    ),
+    IDENTITY_MODEL_MISMATCH: (
+        "Resume refused: source model does not match "
+        "acquisition_source.json."
+    ),
+}
+
+
 def validate_source_identity_for_resume(session):
     """
     Validate recorded acquisition identity against the current source device.
@@ -402,60 +482,22 @@ def validate_source_identity_for_resume(session):
         )
         return result
 
-    recorded_serial = _normalize_identity_text(recorded.get("serial"))
-    current_serial = _normalize_identity_text(session.source_device.serial)
-    recorded_model = _normalize_identity_text(recorded.get("model"))
-    current_model = _normalize_identity_text(session.source_device.model)
-    recorded_size = recorded.get("size_bytes")
     current_size = result["current"]["size_bytes"]
     recorded_path = _normalize_identity_text(recorded.get("path"))
     current_path = _normalize_identity_text(session.source_device.path)
 
-    if current_size is None:
-        result["code"] = "IDENTITY_SIZE_UNDETERMINED"
-        result["message"] = (
-            "Resume refused: current source size could not be determined."
-        )
-        return result
+    code = compare_source_identity(
+        recorded_serial=recorded.get("serial"),
+        current_serial=session.source_device.serial,
+        recorded_model=recorded.get("model"),
+        current_model=session.source_device.model,
+        recorded_size=recorded.get("size_bytes"),
+        current_size=current_size,
+    )
 
-    if recorded_size != current_size:
-        result["code"] = "IDENTITY_SIZE_MISMATCH"
-        result["message"] = (
-            "Resume refused: source size_bytes does not match "
-            "acquisition_source.json."
-        )
-        return result
-
-    recorded_serial_trustworthy = _serial_is_trustworthy(recorded_serial)
-    current_serial_trustworthy = _serial_is_trustworthy(current_serial)
-
-    if recorded_serial_trustworthy and current_serial_trustworthy:
-        if recorded_serial != current_serial:
-            result["code"] = "IDENTITY_SERIAL_MISMATCH"
-            result["message"] = (
-                "Resume refused: source serial does not match "
-                "acquisition_source.json."
-            )
-            return result
-    elif recorded_serial_trustworthy != current_serial_trustworthy:
-        result["code"] = "IDENTITY_SERIAL_UNSTABLE"
-        result["message"] = (
-            "Resume refused: serial identity is missing or unstable."
-        )
-        return result
-    else:
-        result["code"] = "IDENTITY_SERIAL_UNAVAILABLE"
-        result["message"] = (
-            "Resume refused: trustworthy serial identity is unavailable."
-        )
-        return result
-
-    if recorded_model != current_model:
-        result["code"] = "IDENTITY_MODEL_MISMATCH"
-        result["message"] = (
-            "Resume refused: source model does not match "
-            "acquisition_source.json."
-        )
+    if code != IDENTITY_MATCHES:
+        result["code"] = code
+        result["message"] = _RESUME_IDENTITY_MESSAGES[code]
         return result
 
     if recorded_path and current_path and recorded_path != current_path:
