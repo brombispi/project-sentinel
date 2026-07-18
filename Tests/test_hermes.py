@@ -11,7 +11,12 @@ SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from core.session import RecoverySession
-from modules.archive import IMAGE_FILENAME, MAP_FILENAME, SHA256_FILENAME
+from modules.archive import (
+    FingerprintEvidenceError,
+    IMAGE_FILENAME,
+    MAP_FILENAME,
+    SHA256_FILENAME,
+)
 from modules.hermes import (
     FINGERPRINT_ARTIFACT_RELATIVE_PATH,
     Hermes,
@@ -41,6 +46,22 @@ INTEGRITY_VERIFICATION_FIELDS = (
     "Canonical Acquisition Complete",
     "Fingerprint Path",
 )
+
+INTEGRITY_FINGERPRINT_FIELDS = (
+    "Algorithm",
+    "SHA-256 Digest",
+    "Fingerprinted Image",
+    "Image Size (Bytes)",
+    "Fingerprint Timestamp",
+)
+
+FINGERPRINT_EVIDENCE = {
+    "algorithm": "SHA-256",
+    "digest": "abc123def456",
+    "image_filename": "source.img",
+    "image_size_bytes": 500107862016,
+    "timestamp": "2026-07-16 10:05:00",
+}
 
 RECOVERY_STATISTICS_FIELDS = (
     "Recovery Present",
@@ -323,6 +344,11 @@ class HermesTests(unittest.TestCase):
                 integrity["Fingerprint Path"],
                 FINGERPRINT_ARTIFACT_RELATIVE_PATH,
             )
+            self.assertEqual(integrity["Fingerprint Evidence"], "Not recorded")
+            self.assertEqual(
+                list(integrity.keys()),
+                list(INTEGRITY_VERIFICATION_FIELDS) + ["Fingerprint Evidence"],
+            )
 
     def test_build_technician_report_empty_values_become_none(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -508,6 +534,7 @@ class HermesTests(unittest.TestCase):
                 integrity["Fingerprint Path"],
                 FINGERPRINT_ARTIFACT_RELATIVE_PATH,
             )
+            self.assertEqual(integrity["Fingerprint Evidence"], "Not recorded")
 
     def test_build_technician_report_canonical_acquisition_complete(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -537,6 +564,20 @@ class HermesTests(unittest.TestCase):
                 integrity["Fingerprint Path"],
                 FINGERPRINT_ARTIFACT_RELATIVE_PATH,
             )
+            self.assertEqual(integrity["Algorithm"], "SHA-256")
+            self.assertEqual(integrity["SHA-256 Digest"], "abc123")
+            self.assertEqual(integrity["Fingerprinted Image"], "source.img")
+            self.assertEqual(integrity["Image Size (Bytes)"], 1)
+            self.assertEqual(
+                integrity["Fingerprint Timestamp"],
+                "2026-07-16 10:00:00",
+            )
+            self.assertNotIn("Fingerprint Evidence", integrity)
+            self.assertEqual(
+                list(integrity.keys()),
+                list(INTEGRITY_VERIFICATION_FIELDS)
+                + list(INTEGRITY_FINGERPRINT_FIELDS),
+            )
 
     def test_build_technician_markdown_imaging_sections_field_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -550,9 +591,12 @@ class HermesTests(unittest.TestCase):
                 list(report["Imaging Details"].keys()),
                 list(IMAGING_DETAILS_FIELDS),
             )
+            expected_integrity_keys = list(INTEGRITY_VERIFICATION_FIELDS) + [
+                "Fingerprint Evidence"
+            ]
             self.assertEqual(
                 list(report["Integrity Verification"].keys()),
-                list(INTEGRITY_VERIFICATION_FIELDS),
+                expected_integrity_keys,
             )
 
             imaging_heading = markdown.index("## Imaging Details")
@@ -566,10 +610,11 @@ class HermesTests(unittest.TestCase):
             ]
             self.assertEqual(imaging_offsets, sorted(imaging_offsets))
 
-            integrity_section = markdown[integrity_heading:]
+            statistics_heading = markdown.index("## Recovery Statistics")
+            integrity_section = markdown[integrity_heading:statistics_heading]
             integrity_offsets = [
                 integrity_section.index(f"{field}: ")
-                for field in INTEGRITY_VERIFICATION_FIELDS
+                for field in expected_integrity_keys
             ]
             self.assertEqual(integrity_offsets, sorted(integrity_offsets))
 
@@ -739,6 +784,103 @@ class HermesTests(unittest.TestCase):
                 "Recovered Output Locations: None recorded",
                 markdown,
             )
+
+    def test_integrity_verification_valid_fingerprint_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_fingerprint_evidence",
+                return_value=dict(FINGERPRINT_EVIDENCE),
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            integrity = report["Integrity Verification"]
+            self.assertEqual(integrity["Algorithm"], "SHA-256")
+            self.assertEqual(integrity["SHA-256 Digest"], "abc123def456")
+            self.assertEqual(integrity["Fingerprinted Image"], "source.img")
+            self.assertEqual(integrity["Image Size (Bytes)"], 500107862016)
+            self.assertEqual(
+                integrity["Fingerprint Timestamp"],
+                "2026-07-16 10:05:00",
+            )
+            self.assertNotIn("Fingerprint Evidence", integrity)
+            self.assertEqual(
+                list(integrity.keys()),
+                list(INTEGRITY_VERIFICATION_FIELDS)
+                + list(INTEGRITY_FINGERPRINT_FIELDS),
+            )
+
+    def test_integrity_verification_missing_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_fingerprint_evidence",
+                return_value=None,
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            integrity = report["Integrity Verification"]
+            self.assertEqual(integrity["Fingerprint Evidence"], "Not recorded")
+            for field in INTEGRITY_FINGERPRINT_FIELDS:
+                self.assertNotIn(field, integrity)
+
+    def test_integrity_verification_malformed_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_fingerprint_evidence",
+                side_effect=FingerprintEvidenceError("malformed"),
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            integrity = report["Integrity Verification"]
+            self.assertEqual(
+                integrity["Fingerprint Evidence"],
+                "Present but unreadable",
+            )
+            for field in INTEGRITY_FINGERPRINT_FIELDS:
+                self.assertNotIn(field, integrity)
+
+    def test_integrity_verification_markdown_renders_fingerprint_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_fingerprint_evidence",
+                return_value=dict(FINGERPRINT_EVIDENCE),
+            ):
+                markdown = Hermes(session).build_technician_markdown()
+
+            integrity_heading = markdown.index("## Integrity Verification")
+            statistics_heading = markdown.index("## Recovery Statistics")
+            integrity_section = markdown[integrity_heading:statistics_heading]
+
+            self.assertIn("Algorithm: SHA-256", integrity_section)
+            self.assertIn("SHA-256 Digest: abc123def456", integrity_section)
+            self.assertIn("Fingerprinted Image: source.img", integrity_section)
+            self.assertIn("Image Size (Bytes): 500107862016", integrity_section)
+            self.assertIn(
+                "Fingerprint Timestamp: 2026-07-16 10:05:00",
+                integrity_section,
+            )
+            self.assertNotIn("Fingerprint Evidence:", integrity_section)
 
 
 if __name__ == "__main__":

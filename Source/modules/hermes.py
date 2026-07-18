@@ -15,7 +15,9 @@ from modules.archive import (
     IMAGE_FILENAME,
     MAP_FILENAME,
     SHA256_FILENAME,
+    FingerprintEvidenceError,
     classify_acquisition_state,
+    read_fingerprint_evidence,
     summarize_recovered_artifacts,
 )
 from modules.manifest import read_case_manifest
@@ -186,13 +188,30 @@ class Hermes:
         }
 
     def _build_integrity_verification(self, acquisition_state):
-        return {
+        fields = {
             "Fingerprint Present": acquisition_state.get("sha256_exists"),
             "Canonical Acquisition Complete": (
                 acquisition_state.get("state") == "completed_canonical"
             ),
             "Fingerprint Path": FINGERPRINT_ARTIFACT_RELATIVE_PATH,
         }
+
+        try:
+            evidence = read_fingerprint_evidence(self.session.recovery_path)
+        except FingerprintEvidenceError:
+            fields["Fingerprint Evidence"] = "Present but unreadable"
+            return fields
+
+        if evidence is None:
+            fields["Fingerprint Evidence"] = "Not recorded"
+            return fields
+
+        fields["Algorithm"] = evidence["algorithm"]
+        fields["SHA-256 Digest"] = evidence["digest"]
+        fields["Fingerprinted Image"] = evidence["image_filename"]
+        fields["Image Size (Bytes)"] = evidence["image_size_bytes"]
+        fields["Fingerprint Timestamp"] = evidence["timestamp"]
+        return fields
 
     def _load_recovered_summary(self):
         return summarize_recovered_artifacts(self.session.recovery_path)
