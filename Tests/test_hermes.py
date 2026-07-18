@@ -42,6 +42,14 @@ INTEGRITY_VERIFICATION_FIELDS = (
     "Fingerprint Path",
 )
 
+RECOVERY_STATISTICS_FIELDS = (
+    "Recovery Present",
+    "Recovered File Count",
+    "Recovered Directory Count",
+    "Recovered Size (Bytes)",
+    "Recovered Output Locations",
+)
+
 INCOMPLETE_DDRESCUE_MAP = (
     "# Mapfile. Created by GNU ddrescue\n"
     "# current_pos  current_status  current_pass\n"
@@ -153,6 +161,13 @@ def _write_canonical_acquisition_artifacts(case_dir):
         "timestamp=2026-07-16 10:00:00\n",
         encoding="utf-8",
     )
+
+
+def _write_recovered_artifacts(case_dir):
+    recup_dir = case_dir / "recovered" / "recup.1"
+    recup_dir.mkdir(parents=True, exist_ok=True)
+    (recup_dir / "f1.jpg").write_bytes(b"12345")
+    (recup_dir / "f2.jpg").write_bytes(b"678")
 
 
 class HermesTests(unittest.TestCase):
@@ -557,6 +572,173 @@ class HermesTests(unittest.TestCase):
                 for field in INTEGRITY_VERIFICATION_FIELDS
             ]
             self.assertEqual(integrity_offsets, sorted(integrity_offsets))
+
+
+    def test_recovery_statistics_populated_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_recovered_artifacts(case_dir)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+            statistics = report["Recovery Statistics"]
+
+            self.assertEqual(
+                list(statistics.keys()),
+                list(RECOVERY_STATISTICS_FIELDS),
+            )
+            self.assertEqual(statistics["Recovery Present"], "Yes")
+            self.assertEqual(statistics["Recovered File Count"], 2)
+            self.assertEqual(statistics["Recovered Directory Count"], 1)
+            self.assertEqual(statistics["Recovered Size (Bytes)"], 8)
+            self.assertEqual(
+                statistics["Recovered Output Locations"],
+                "recovered/recup.1",
+            )
+
+    def test_recovery_statistics_empty_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+            statistics = report["Recovery Statistics"]
+
+            self.assertEqual(
+                list(statistics.keys()),
+                list(RECOVERY_STATISTICS_FIELDS),
+            )
+            self.assertEqual(statistics["Recovery Present"], "No")
+            self.assertEqual(statistics["Recovered File Count"], 0)
+            self.assertEqual(statistics["Recovered Directory Count"], 0)
+            self.assertEqual(statistics["Recovered Size (Bytes)"], 0)
+            self.assertEqual(
+                statistics["Recovered Output Locations"],
+                "None recorded",
+            )
+
+    def test_recovery_statistics_uses_owner_api_not_filesystem(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            # Real recovered artifacts on disk that MUST be ignored because
+            # HERMES has to delegate to the owner API, not traverse itself.
+            _write_recovered_artifacts(case_dir)
+
+            owner_summary = {
+                "recovered_file_count": 42,
+                "recovered_directory_count": 3,
+                "recovered_size_bytes": 123456,
+                "recup_directories": [
+                    "recovered/recup.1",
+                    "recovered/recup.2",
+                ],
+                "recovery_present": True,
+            }
+
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.summarize_recovered_artifacts",
+                return_value=owner_summary,
+            ) as summarize_mock:
+                report = Hermes(session).build_technician_report()
+
+            summarize_mock.assert_called_once_with(session.recovery_path)
+
+            statistics = report["Recovery Statistics"]
+            self.assertEqual(statistics["Recovery Present"], "Yes")
+            self.assertEqual(statistics["Recovered File Count"], 42)
+            self.assertEqual(statistics["Recovered Directory Count"], 3)
+            self.assertEqual(statistics["Recovered Size (Bytes)"], 123456)
+            self.assertEqual(
+                statistics["Recovered Output Locations"],
+                ["recovered/recup.1", "recovered/recup.2"],
+            )
+
+    def test_recovery_statistics_markdown_renders_after_integrity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_recovered_artifacts(case_dir)
+
+            markdown = Hermes(_session(case_dir)).build_technician_markdown()
+
+            integrity_heading = markdown.index("## Integrity Verification")
+            statistics_heading = markdown.index("## Recovery Statistics")
+            self.assertLess(integrity_heading, statistics_heading)
+
+            statistics_section = markdown[statistics_heading:]
+            self.assertIn("Recovery Present: Yes", statistics_section)
+            self.assertIn("Recovered File Count: 2", statistics_section)
+            self.assertIn("Recovered Directory Count: 1", statistics_section)
+            self.assertIn("Recovered Size (Bytes): 8", statistics_section)
+            self.assertIn(
+                "Recovered Output Locations: recovered/recup.1",
+                statistics_section,
+            )
+
+            statistics_offsets = [
+                statistics_section.index(f"{field}: ")
+                for field in RECOVERY_STATISTICS_FIELDS
+            ]
+            self.assertEqual(statistics_offsets, sorted(statistics_offsets))
+
+    def test_recovery_statistics_single_location_renders_inline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_recovered_artifacts(case_dir)
+
+            markdown = Hermes(_session(case_dir)).build_technician_markdown()
+
+            self.assertIn(
+                "Recovered Output Locations: recovered/recup.1",
+                markdown,
+            )
+
+    def test_recovery_statistics_multiple_locations_render_as_bullets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            owner_summary = {
+                "recovered_file_count": 5,
+                "recovered_directory_count": 3,
+                "recovered_size_bytes": 999,
+                "recup_directories": [
+                    "recovered/recup.1",
+                    "recovered/recup.2",
+                    "recovered/recup.3",
+                ],
+                "recovery_present": True,
+            }
+
+            with mock.patch(
+                "modules.hermes.summarize_recovered_artifacts",
+                return_value=owner_summary,
+            ):
+                markdown = Hermes(_session(case_dir)).build_technician_markdown()
+
+            self.assertIn(
+                "Recovered Output Locations:\n"
+                "- recovered/recup.1\n"
+                "- recovered/recup.2\n"
+                "- recovered/recup.3",
+                markdown,
+            )
+
+    def test_recovery_statistics_none_renders_inline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            markdown = Hermes(_session(case_dir)).build_technician_markdown()
+
+            self.assertIn(
+                "Recovered Output Locations: None recorded",
+                markdown,
+            )
 
 
 if __name__ == "__main__":

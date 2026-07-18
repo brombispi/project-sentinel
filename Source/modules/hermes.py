@@ -16,6 +16,7 @@ from modules.archive import (
     MAP_FILENAME,
     SHA256_FILENAME,
     classify_acquisition_state,
+    summarize_recovered_artifacts,
 )
 from modules.manifest import read_case_manifest
 from modules.report_formatter import ReportFormatter
@@ -30,6 +31,7 @@ TECHNICIAN_REPORT_SECTIONS = (
     "Assessment Results",
     "Imaging Details",
     "Integrity Verification",
+    "Recovery Statistics",
 )
 
 IMAGE_ARTIFACT_RELATIVE_PATH = f"images/{IMAGE_FILENAME}"
@@ -192,6 +194,31 @@ class Hermes:
             "Fingerprint Path": FINGERPRINT_ARTIFACT_RELATIVE_PATH,
         }
 
+    def _load_recovered_summary(self):
+        return summarize_recovered_artifacts(self.session.recovery_path)
+
+    def _build_recovery_statistics(self, recovered_summary):
+        locations = recovered_summary["recup_directories"]
+
+        if not locations:
+            output_locations = "None recorded"
+        elif len(locations) == 1:
+            output_locations = locations[0]
+        else:
+            output_locations = list(locations)
+
+        return {
+            "Recovery Present": (
+                "Yes" if recovered_summary["recovery_present"] else "No"
+            ),
+            "Recovered File Count": recovered_summary["recovered_file_count"],
+            "Recovered Directory Count": recovered_summary[
+                "recovered_directory_count"
+            ],
+            "Recovered Size (Bytes)": recovered_summary["recovered_size_bytes"],
+            "Recovered Output Locations": output_locations,
+        }
+
     def build_technician_report(self):
         """
         Build the technician report for the current recovery session.
@@ -199,6 +226,7 @@ class Hermes:
         manifest = self._load_manifest()
         generated_at = datetime.now()
         acquisition_state = self._load_acquisition_state()
+        recovered_summary = self._load_recovered_summary()
 
         return {
             "Case Information": self._build_case_information(manifest, generated_at),
@@ -209,6 +237,9 @@ class Hermes:
             "Imaging Details": self._build_imaging_details(acquisition_state),
             "Integrity Verification": self._build_integrity_verification(
                 acquisition_state
+            ),
+            "Recovery Statistics": self._build_recovery_statistics(
+                recovered_summary
             ),
         }
 

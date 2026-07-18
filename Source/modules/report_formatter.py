@@ -35,7 +35,12 @@ class ReportFormatter:
             lines.append("")
 
             for key, value in fields.items():
-                lines.append(f"{key}: {value}")
+                if isinstance(value, (list, tuple)):
+                    lines.append(f"{key}:")
+                    for item in value:
+                        lines.append(f"- {item}")
+                else:
+                    lines.append(f"{key}: {value}")
 
             lines.append("")
 
