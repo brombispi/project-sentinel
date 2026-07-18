@@ -19,6 +19,7 @@ from modules.archive import (
     SHA256_FILENAME,
 )
 from modules.argus import SmartEvidenceError
+from modules.echo import AuditLogError
 from modules.hermes import (
     FINGERPRINT_ARTIFACT_RELATIVE_PATH,
     Hermes,
@@ -207,6 +208,22 @@ def _write_recovered_artifacts(case_dir):
     recup_dir.mkdir(parents=True, exist_ok=True)
     (recup_dir / "f1.jpg").write_bytes(b"12345")
     (recup_dir / "f2.jpg").write_bytes(b"678")
+
+
+AUDIT_LOG_LINES = (
+    "2026-07-16 10:00:00 [ARCHIVE][INFO] Recovery session created.",
+    "2026-07-16 10:20:41 [ARCHIVE][INFO] Forensic imaging completed.",
+    "2026-07-16 11:02:55 [SENTINEL][OPERATOR] Recovery finalization approved.",
+)
+
+
+def _write_audit_log(case_dir, lines=()):
+    log_path = case_dir / "audit.log"
+    log_path.write_text(
+        "\n".join(lines) + ("\n" if lines else ""),
+        encoding="utf-8",
+    )
+    return log_path
 
 
 class HermesTests(unittest.TestCase):
@@ -829,6 +846,125 @@ class HermesTests(unittest.TestCase):
             self.assertIn(
                 "Recovered Output Locations: None recorded",
                 markdown,
+            )
+
+    def test_audit_timeline_multiple_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_audit_log(case_dir, AUDIT_LOG_LINES)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                list(AUDIT_LOG_LINES),
+            )
+
+    def test_audit_timeline_single_entry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_audit_log(case_dir, (AUDIT_LOG_LINES[0],))
+
+            hermes = Hermes(_session(case_dir))
+            report = hermes.build_technician_report()
+            markdown = hermes.build_technician_markdown()
+
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                [AUDIT_LOG_LINES[0]],
+            )
+            self.assertIn(
+                f"Events:\n- {AUDIT_LOG_LINES[0]}",
+                markdown,
+            )
+
+    def test_audit_timeline_empty_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_audit_log(case_dir)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                "No audit events recorded",
+            )
+
+    def test_audit_timeline_missing_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                "No audit events recorded",
+            )
+
+    def test_audit_timeline_unreadable_renders_placeholder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_audit_log",
+                side_effect=AuditLogError("unreadable"),
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                "Present but unreadable",
+            )
+
+    def test_audit_timeline_uses_owner_api_with_recovery_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            # Real audit.log on disk that MUST be ignored because HERMES has
+            # to delegate to the owner API, not open the file itself.
+            _write_audit_log(case_dir, AUDIT_LOG_LINES)
+            session = _session(case_dir)
+
+            owner_events = ["OWNER LINE A", "OWNER LINE B"]
+
+            with mock.patch(
+                "modules.hermes.read_audit_log",
+                return_value=owner_events,
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                owner_events,
+            )
+
+    def test_audit_timeline_placed_after_recovery_statistics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_audit_log(case_dir, AUDIT_LOG_LINES)
+
+            hermes = Hermes(_session(case_dir))
+            report = hermes.build_technician_report()
+            markdown = hermes.build_technician_markdown()
+
+            section_keys = list(report.keys())
+            self.assertEqual(
+                section_keys.index("Audit Timeline"),
+                section_keys.index("Recovery Statistics") + 1,
+            )
+
+            self.assertLess(
+                markdown.index("## Recovery Statistics"),
+                markdown.index("## Audit Timeline"),
             )
 
     def test_device_identity_smart_available_passed(self):

@@ -23,6 +23,7 @@ from modules.archive import (
     summarize_recovered_artifacts,
 )
 from modules.argus import SmartEvidenceError, read_smart_evidence
+from modules.echo import AuditLogError, read_audit_log
 from modules.manifest import read_case_manifest
 from modules.report_formatter import ReportFormatter
 
@@ -37,6 +38,7 @@ TECHNICIAN_REPORT_SECTIONS = (
     "Imaging Details",
     "Integrity Verification",
     "Recovery Statistics",
+    "Audit Timeline",
 )
 
 IMAGE_ARTIFACT_RELATIVE_PATH = f"images/{IMAGE_FILENAME}"
@@ -277,6 +279,17 @@ class Hermes:
             "Recovered Output Locations": output_locations,
         }
 
+    def _build_audit_timeline(self):
+        try:
+            events = read_audit_log(self.session.recovery_path)
+        except AuditLogError:
+            return {"Events": "Present but unreadable"}
+
+        if not events:
+            return {"Events": "No audit events recorded"}
+
+        return {"Events": events}
+
     def build_technician_report(self):
         """
         Build the technician report for the current recovery session.
@@ -299,6 +312,7 @@ class Hermes:
             "Recovery Statistics": self._build_recovery_statistics(
                 recovered_summary
             ),
+            "Audit Timeline": self._build_audit_timeline(),
         }
 
     def build_technician_markdown(self):
