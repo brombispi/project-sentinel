@@ -345,7 +345,15 @@ class Hermes:
     def _load_recovered_summary(self):
         return summarize_recovered_artifacts(self.session.recovery_path)
 
-    def _build_recovery_statistics(self, recovered_summary):
+    @staticmethod
+    def _recovery_attempt_recorded(recovery_operations):
+        # Authoritative: a recovery attempt exists iff recovery_operations holds
+        # at least one recorded entry. Any valid state counts (RUNNING,
+        # COMPLETED, FAILED, INTERRUPTED); success and recovered artifacts are
+        # separate facts (see RecoveryOperationReporting.md).
+        return "Yes" if recovery_operations else "No"
+
+    def _build_recovery_statistics(self, recovered_summary, recovery_operations):
         locations = recovered_summary["recup_directories"]
 
         if not locations:
@@ -356,8 +364,8 @@ class Hermes:
             output_locations = list(locations)
 
         return {
-            "Recovery Present": (
-                "Yes" if recovered_summary["recovery_present"] else "No"
+            "Recovery Attempt Recorded": self._recovery_attempt_recorded(
+                recovery_operations
             ),
             "Recovered File Count": recovered_summary["recovered_file_count"],
             "Recovered Directory Count": recovered_summary[
@@ -386,6 +394,7 @@ class Hermes:
         generated_at = datetime.now()
         acquisition_state = self._load_acquisition_state()
         recovered_summary = self._load_recovered_summary()
+        recovery_operations = manifest.get("recovery_operations") or []
 
         return {
             "Case Information": self._build_case_information(manifest, generated_at),
@@ -398,7 +407,7 @@ class Hermes:
                 acquisition_state
             ),
             "Recovery Statistics": self._build_recovery_statistics(
-                recovered_summary
+                recovered_summary, recovery_operations
             ),
             "Audit Timeline": self._build_audit_timeline(),
         }

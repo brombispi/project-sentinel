@@ -91,12 +91,21 @@ FINGERPRINT_EVIDENCE = {
 }
 
 RECOVERY_STATISTICS_FIELDS = (
-    "Recovery Present",
+    "Recovery Attempt Recorded",
     "Recovered File Count",
     "Recovered Directory Count",
     "Recovered Size (Bytes)",
     "Recovered Output Locations",
 )
+
+
+def _recovery_operation(state="COMPLETED", operation_type="PHOTOREC"):
+    return {
+        "type": operation_type,
+        "state": state,
+        "started_at": "2026-07-16T11:00:05",
+        "finished_at": None if state == "RUNNING" else "2026-07-16T11:42:31",
+    }
 
 INCOMPLETE_DDRESCUE_MAP = (
     "# Mapfile. Created by GNU ddrescue\n"
@@ -693,7 +702,12 @@ class HermesTests(unittest.TestCase):
     def test_recovery_statistics_populated_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             case_dir = _case_dir(temp_dir)
-            _write_manifest(case_dir, _minimal_manifest())
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    recovery_operations=[_recovery_operation("COMPLETED")]
+                ),
+            )
             _write_recovered_artifacts(case_dir)
 
             report = Hermes(_session(case_dir)).build_technician_report()
@@ -703,7 +717,7 @@ class HermesTests(unittest.TestCase):
                 list(statistics.keys()),
                 list(RECOVERY_STATISTICS_FIELDS),
             )
-            self.assertEqual(statistics["Recovery Present"], "Yes")
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "Yes")
             self.assertEqual(statistics["Recovered File Count"], 2)
             self.assertEqual(statistics["Recovered Directory Count"], 1)
             self.assertEqual(statistics["Recovered Size (Bytes)"], 8)
@@ -724,7 +738,7 @@ class HermesTests(unittest.TestCase):
                 list(statistics.keys()),
                 list(RECOVERY_STATISTICS_FIELDS),
             )
-            self.assertEqual(statistics["Recovery Present"], "No")
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "No")
             self.assertEqual(statistics["Recovered File Count"], 0)
             self.assertEqual(statistics["Recovered Directory Count"], 0)
             self.assertEqual(statistics["Recovered Size (Bytes)"], 0)
@@ -732,6 +746,121 @@ class HermesTests(unittest.TestCase):
                 statistics["Recovered Output Locations"],
                 "None recorded",
             )
+
+    def test_recovery_attempt_recorded_completed_with_zero_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    recovery_operations=[_recovery_operation("COMPLETED")]
+                ),
+            )
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            # Completed execution that recovered nothing is still a recorded
+            # attempt; artifact count stays a separate, observational fact.
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "Yes")
+            self.assertEqual(statistics["Recovered File Count"], 0)
+
+    def test_recovery_attempt_recorded_failed_with_zero_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    recovery_operations=[_recovery_operation("FAILED")]
+                ),
+            )
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "Yes")
+            self.assertEqual(statistics["Recovered File Count"], 0)
+
+    def test_recovery_attempt_recorded_interrupted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    recovery_operations=[_recovery_operation("INTERRUPTED")]
+                ),
+            )
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "Yes")
+
+    def test_recovery_attempt_recorded_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    recovery_operations=[_recovery_operation("RUNNING")]
+                ),
+            )
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "Yes")
+
+    def test_recovery_attempt_recorded_legacy_artifacts_without_operations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            # Recovered artifacts exist on disk but no operation is recorded.
+            # The field must not infer an attempt from artifact presence.
+            _write_recovered_artifacts(case_dir)
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "No")
+            self.assertEqual(statistics["Recovered File Count"], 2)
+
+    def test_recovery_attempt_recorded_absent_field(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            # Legacy manifest without a recovery_operations key at all.
+            _write_manifest(case_dir, _minimal_manifest())
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "No")
+
+    def test_recovery_attempt_recorded_empty_list(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(
+                case_dir, _minimal_manifest(recovery_operations=[])
+            )
+
+            statistics = (
+                Hermes(_session(case_dir))
+                .build_technician_report()["Recovery Statistics"]
+            )
+
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "No")
 
     def test_recovery_statistics_uses_owner_api_not_filesystem(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -763,7 +892,10 @@ class HermesTests(unittest.TestCase):
             summarize_mock.assert_called_once_with(session.recovery_path)
 
             statistics = report["Recovery Statistics"]
-            self.assertEqual(statistics["Recovery Present"], "Yes")
+            # Even though the owner summary reports recovery_present=True and
+            # real artifacts exist on disk, no operation is recorded, so the
+            # authoritative field is "No". Counts still come from the owner API.
+            self.assertEqual(statistics["Recovery Attempt Recorded"], "No")
             self.assertEqual(statistics["Recovered File Count"], 42)
             self.assertEqual(statistics["Recovered Directory Count"], 3)
             self.assertEqual(statistics["Recovered Size (Bytes)"], 123456)
@@ -775,7 +907,12 @@ class HermesTests(unittest.TestCase):
     def test_recovery_statistics_markdown_renders_after_integrity(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             case_dir = _case_dir(temp_dir)
-            _write_manifest(case_dir, _minimal_manifest())
+            _write_manifest(
+                case_dir,
+                _minimal_manifest(
+                    recovery_operations=[_recovery_operation("COMPLETED")]
+                ),
+            )
             _write_recovered_artifacts(case_dir)
 
             markdown = Hermes(_session(case_dir)).build_technician_markdown()
@@ -785,7 +922,7 @@ class HermesTests(unittest.TestCase):
             self.assertLess(integrity_heading, statistics_heading)
 
             statistics_section = markdown[statistics_heading:]
-            self.assertIn("Recovery Present: Yes", statistics_section)
+            self.assertIn("Recovery Attempt Recorded: Yes", statistics_section)
             self.assertIn("Recovered File Count: 2", statistics_section)
             self.assertIn("Recovered Directory Count: 1", statistics_section)
             self.assertIn("Recovered Size (Bytes): 8", statistics_section)
