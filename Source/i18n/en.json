@@ -247,6 +247,11 @@
 
     "delivery.prompt.finalize": "Finalize recovery work? [y/N]:",
     "delivery.label.finalized": "Recovery work finalized. Case status is now COMPLETED.",
+    "delivery.outcome.title": "RECOVERY OUTCOME",
+    "delivery.outcome.option.successful": "[1] Successful",
+    "delivery.outcome.option.partial": "[2] Partial",
+    "delivery.outcome.option.unsuccessful": "[3] Unsuccessful",
+    "delivery.prompt.outcome": "Select recovery outcome [1-3]:",
 
     "route.label.recovery_case": "Recovery Case :",
     "route.label.case_name": "Case Name     :",

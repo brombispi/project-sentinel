@@ -247,6 +247,11 @@
 
     "delivery.prompt.finalize": "Wiederherstellungsarbeit abschliessen? [j/N]:",
     "delivery.label.finalized": "Wiederherstellungsarbeit abgeschlossen. Fallstatus ist jetzt COMPLETED.",
+    "delivery.outcome.title": "WIEDERHERSTELLUNGSERGEBNIS",
+    "delivery.outcome.option.successful": "[1] Erfolgreich",
+    "delivery.outcome.option.partial": "[2] Teilweise",
+    "delivery.outcome.option.unsuccessful": "[3] Nicht erfolgreich",
+    "delivery.prompt.outcome": "Wiederherstellungsergebnis auswählen [1-3]:",
 
     "route.label.recovery_case": "Wiederherstellungsfall :",
     "route.label.case_name": "Fallname              :",

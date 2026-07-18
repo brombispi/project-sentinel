@@ -117,6 +117,9 @@ def write_case_manifest(session, device, assessment, intake=None):
     if getattr(session, "completed_at", None):
         manifest["completed_at"] = session.completed_at
 
+    if getattr(session, "recovery_outcome", None):
+        manifest["recovery_outcome"] = session.recovery_outcome
+
     if session.destination_device:
         manifest["destination"] = {
             "path": session.destination_device.path,

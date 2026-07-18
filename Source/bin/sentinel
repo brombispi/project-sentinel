@@ -73,7 +73,7 @@ from i18n import (
 )
 from core.codex import Codex
 from core.session import RecoverySession
-from core.status import RecoveryStatus
+from core.status import RecoveryOutcome, RecoveryStatus
 
 init_language(PROJECT_ROOT)
 
@@ -1156,6 +1156,32 @@ def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None)
     )
 
 
+def _parse_recovery_outcome(choice):
+    return {
+        "1": RecoveryOutcome.SUCCESSFUL,
+        "2": RecoveryOutcome.PARTIAL,
+        "3": RecoveryOutcome.UNSUCCESSFUL,
+    }.get(choice.strip())
+
+
+def _prompt_recovery_outcome():
+    print()
+    print(tr("delivery.outcome.title"))
+    print(tr("delivery.outcome.option.successful"))
+    print(tr("delivery.outcome.option.partial"))
+    print(tr("delivery.outcome.option.unsuccessful"))
+    print()
+
+    while True:
+        choice = input(tr("delivery.prompt.outcome"))
+        outcome = _parse_recovery_outcome(choice)
+
+        if outcome is not None:
+            return outcome
+
+        print(tr("validation.invalid_selection"))
+
+
 def _offer_finalize_recovery(session, assessment, intake, recovery_result):
     if session.status != RecoveryStatus.READY_FOR_RECOVERY:
         return
@@ -1173,6 +1199,15 @@ def _offer_finalize_recovery(session, assessment, intake, recovery_result):
         "SENTINEL",
         "Recovery finalization approved.",
     )
+
+    if session.recovery_outcome is None:
+        outcome = _prompt_recovery_outcome()
+        session.recovery_outcome = outcome.value
+        log_operator(
+            session,
+            "SENTINEL",
+            f"Recovery outcome recorded: {outcome.value}",
+        )
 
     update_status(
         session,

@@ -18,6 +18,7 @@ class RecoverySession:
     case_name: str = ""
 
     completed_at: str | None = None
+    recovery_outcome: str | None = None
 
     source_device: object | None = None
     destination_device: object | None = None
