@@ -15,8 +15,10 @@ from modules.archive import (
     IMAGE_FILENAME,
     MAP_FILENAME,
     SHA256_FILENAME,
+    AcquisitionSourceError,
     FingerprintEvidenceError,
     classify_acquisition_state,
+    read_acquisition_source,
     read_fingerprint_evidence,
     summarize_recovered_artifacts,
 )
@@ -172,7 +174,7 @@ class Hermes:
         return classify_acquisition_state(self.session.recovery_path)
 
     def _build_imaging_details(self, acquisition_state):
-        return {
+        fields = {
             "Acquisition State": _coerce_display_value(acquisition_state.get("state")),
             "Acquisition State Code": _coerce_display_value(
                 acquisition_state.get("code")
@@ -186,6 +188,23 @@ class Hermes:
             "Image Path": IMAGE_ARTIFACT_RELATIVE_PATH,
             "Map Path": MAP_ARTIFACT_RELATIVE_PATH,
         }
+
+        try:
+            acquisition_source = read_acquisition_source(self.session.recovery_path)
+        except AcquisitionSourceError:
+            fields["Acquisition Source Evidence"] = "Present but unreadable"
+            return fields
+
+        if acquisition_source is None:
+            fields["Acquisition Source Evidence"] = "Not recorded"
+            return fields
+
+        fields["Logical Sector Size"] = acquisition_source.get("logical_sector_size")
+        fields["Physical Sector Size"] = acquisition_source.get(
+            "physical_sector_size"
+        )
+        fields["Acquisition Timestamp"] = acquisition_source.get("timestamp")
+        return fields
 
     def _build_integrity_verification(self, acquisition_state):
         fields = {

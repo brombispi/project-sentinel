@@ -12,6 +12,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 from core.session import RecoverySession
 from modules.archive import (
+    AcquisitionSourceError,
     FingerprintEvidenceError,
     IMAGE_FILENAME,
     MAP_FILENAME,
@@ -40,6 +41,22 @@ IMAGING_DETAILS_FIELDS = (
     "Image Path",
     "Map Path",
 )
+
+IMAGING_ACQUISITION_SOURCE_FIELDS = (
+    "Logical Sector Size",
+    "Physical Sector Size",
+    "Acquisition Timestamp",
+)
+
+ACQUISITION_SOURCE = {
+    "serial": "S4EWNF0M803123A",
+    "model": "Samsung SSD 860",
+    "size_bytes": 500107862016,
+    "logical_sector_size": 512,
+    "physical_sector_size": 4096,
+    "path": "/dev/sdb",
+    "timestamp": "2026-07-16T10:00:00",
+}
 
 INTEGRITY_VERIFICATION_FIELDS = (
     "Fingerprint Present",
@@ -336,6 +353,14 @@ class HermesTests(unittest.TestCase):
             self.assertIsNone(imaging["Map Current Status"])
             self.assertEqual(imaging["Image Path"], IMAGE_ARTIFACT_RELATIVE_PATH)
             self.assertEqual(imaging["Map Path"], MAP_ARTIFACT_RELATIVE_PATH)
+            self.assertEqual(
+                imaging["Acquisition Source Evidence"],
+                "Not recorded",
+            )
+            self.assertEqual(
+                list(imaging.keys()),
+                list(IMAGING_DETAILS_FIELDS) + ["Acquisition Source Evidence"],
+            )
 
             integrity = report["Integrity Verification"]
             self.assertFalse(integrity["Fingerprint Present"])
@@ -527,6 +552,10 @@ class HermesTests(unittest.TestCase):
             self.assertEqual(imaging["Map Current Status"], "?")
             self.assertEqual(imaging["Image Path"], IMAGE_ARTIFACT_RELATIVE_PATH)
             self.assertEqual(imaging["Map Path"], MAP_ARTIFACT_RELATIVE_PATH)
+            self.assertEqual(
+                imaging["Acquisition Source Evidence"],
+                "Not recorded",
+            )
 
             self.assertFalse(integrity["Fingerprint Present"])
             self.assertFalse(integrity["Canonical Acquisition Complete"])
@@ -557,6 +586,10 @@ class HermesTests(unittest.TestCase):
             self.assertIsNone(imaging["Map Current Status"])
             self.assertEqual(imaging["Image Path"], IMAGE_ARTIFACT_RELATIVE_PATH)
             self.assertEqual(imaging["Map Path"], MAP_ARTIFACT_RELATIVE_PATH)
+            self.assertEqual(
+                imaging["Acquisition Source Evidence"],
+                "Not recorded",
+            )
 
             self.assertTrue(integrity["Fingerprint Present"])
             self.assertTrue(integrity["Canonical Acquisition Complete"])
@@ -587,10 +620,14 @@ class HermesTests(unittest.TestCase):
             report = Hermes(_session(case_dir)).build_technician_report()
             markdown = Hermes(_session(case_dir)).build_technician_markdown()
 
+            expected_imaging_keys = list(IMAGING_DETAILS_FIELDS) + [
+                "Acquisition Source Evidence"
+            ]
             self.assertEqual(
                 list(report["Imaging Details"].keys()),
-                list(IMAGING_DETAILS_FIELDS),
+                expected_imaging_keys,
             )
+
             expected_integrity_keys = list(INTEGRITY_VERIFICATION_FIELDS) + [
                 "Fingerprint Evidence"
             ]
@@ -606,7 +643,7 @@ class HermesTests(unittest.TestCase):
             imaging_section = markdown[imaging_heading:integrity_heading]
             imaging_offsets = [
                 imaging_section.index(f"{field}: ")
-                for field in IMAGING_DETAILS_FIELDS
+                for field in expected_imaging_keys
             ]
             self.assertEqual(imaging_offsets, sorted(imaging_offsets))
 
@@ -784,6 +821,106 @@ class HermesTests(unittest.TestCase):
                 "Recovered Output Locations: None recorded",
                 markdown,
             )
+
+    def test_imaging_details_valid_acquisition_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_acquisition_source",
+                return_value=dict(ACQUISITION_SOURCE),
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            imaging = report["Imaging Details"]
+            self.assertEqual(imaging["Logical Sector Size"], 512)
+            self.assertEqual(imaging["Physical Sector Size"], 4096)
+            self.assertEqual(
+                imaging["Acquisition Timestamp"],
+                "2026-07-16T10:00:00",
+            )
+            self.assertNotIn("Acquisition Source Evidence", imaging)
+            # Model, Serial, and Device Size must never be duplicated here.
+            self.assertNotIn("Model", imaging)
+            self.assertNotIn("Serial", imaging)
+            self.assertNotIn("Device Size", imaging)
+            self.assertEqual(
+                list(imaging.keys()),
+                list(IMAGING_DETAILS_FIELDS)
+                + list(IMAGING_ACQUISITION_SOURCE_FIELDS),
+            )
+
+    def test_imaging_details_missing_acquisition_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_acquisition_source",
+                return_value=None,
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            imaging = report["Imaging Details"]
+            self.assertEqual(
+                imaging["Acquisition Source Evidence"],
+                "Not recorded",
+            )
+            for field in IMAGING_ACQUISITION_SOURCE_FIELDS:
+                self.assertNotIn(field, imaging)
+
+    def test_imaging_details_malformed_acquisition_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_acquisition_source",
+                side_effect=AcquisitionSourceError("malformed"),
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            imaging = report["Imaging Details"]
+            self.assertEqual(
+                imaging["Acquisition Source Evidence"],
+                "Present but unreadable",
+            )
+            for field in IMAGING_ACQUISITION_SOURCE_FIELDS:
+                self.assertNotIn(field, imaging)
+
+    def test_imaging_details_markdown_renders_acquisition_source_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_acquisition_source",
+                return_value=dict(ACQUISITION_SOURCE),
+            ):
+                markdown = Hermes(session).build_technician_markdown()
+
+            imaging_heading = markdown.index("## Imaging Details")
+            integrity_heading = markdown.index("## Integrity Verification")
+            imaging_section = markdown[imaging_heading:integrity_heading]
+
+            self.assertIn("Logical Sector Size: 512", imaging_section)
+            self.assertIn("Physical Sector Size: 4096", imaging_section)
+            self.assertIn(
+                "Acquisition Timestamp: 2026-07-16T10:00:00",
+                imaging_section,
+            )
+            self.assertNotIn("Acquisition Source Evidence:", imaging_section)
 
     def test_integrity_verification_valid_fingerprint_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
