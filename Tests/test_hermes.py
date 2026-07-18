@@ -21,6 +21,14 @@ from modules.archive import (
 from modules.argus import SmartEvidenceError
 from modules.echo import AuditLogError
 from modules.hermes import (
+    CUSTOMER_DISCLAIMER,
+    CUSTOMER_IMAGING_COMPLETED,
+    CUSTOMER_IMAGING_NOT_COMPLETED,
+    CUSTOMER_IMAGING_NOT_PERFORMED,
+    CUSTOMER_POLICY_VERSION,
+    CUSTOMER_RECOMMENDATIONS,
+    CUSTOMER_REPORT_FILENAME,
+    CUSTOMER_REPORT_SECTIONS,
     FINGERPRINT_ARTIFACT_RELATIVE_PATH,
     Hermes,
     IMAGE_ARTIFACT_RELATIVE_PATH,
@@ -1305,6 +1313,324 @@ class HermesTests(unittest.TestCase):
                 integrity_section,
             )
             self.assertNotIn("Fingerprint Evidence:", integrity_section)
+
+
+class HermesCustomerReportTests(unittest.TestCase):
+    def setUp(self):
+        self.datetime_patcher = mock.patch(
+            "modules.hermes.datetime",
+            wraps=datetime,
+        )
+        self.mock_datetime = self.datetime_patcher.start()
+        self.mock_datetime.now.return_value = FIXED_GENERATED_AT
+
+    def tearDown(self):
+        self.datetime_patcher.stop()
+
+    def _completed_manifest(self, session_id="REC-2026-000001", outcome="SUCCESSFUL"):
+        manifest = _populated_manifest(session_id)
+        manifest["completed_at"] = "2026-07-17T09:00:00"
+        manifest["recovery_outcome"] = outcome
+        manifest["intake"]["previous_recovery_attempts"] = (
+            "Sent to another lab called DataMedic first"
+        )
+        return manifest
+
+    def _work_performed_section(self, markdown):
+        start = markdown.index("## Work Performed")
+        end = markdown.index("## Recovery Outcome")
+        return markdown[start:end]
+
+    def test_customer_report_sections_and_field_mappings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+
+            report = Hermes(_session(case_dir)).build_customer_report()
+
+            self.assertEqual(list(report.keys()), list(CUSTOMER_REPORT_SECTIONS))
+
+            case_info = report["Case Information"]
+            self.assertEqual(case_info["Case Number"], "REC-2026-000001")
+            self.assertEqual(case_info["Customer Name"], "Jane Example")
+
+            device = report["Device Received"]
+            self.assertEqual(device["Device"], "Samsung SSD 860")
+            # Capacity reuses the existing format_bytes helper over the recorded
+            # size_bytes, producing natural units instead of the raw "500G".
+            self.assertEqual(device["Capacity"], "465.8 GB")
+            self.assertEqual(device["Number of Devices Received"], 1)
+
+            problem = report["Problem Description"]
+            self.assertEqual(
+                problem["Requested Recovery"], "Recover family photos"
+            )
+            self.assertEqual(
+                problem["What Happened"],
+                "Drive stopped mounting after power loss",
+            )
+            self.assertEqual(
+                problem["Most Important Data"], "Photos and documents"
+            )
+
+            self.assertEqual(
+                report["Recommendations"]["Guidance"], CUSTOMER_RECOMMENDATIONS
+            )
+            self.assertEqual(
+                report["Recommendations"]["Policy Version"],
+                CUSTOMER_POLICY_VERSION,
+            )
+            self.assertEqual(report["Disclaimer"]["Terms"], CUSTOMER_DISCLAIMER)
+            self.assertEqual(
+                report["Disclaimer"]["Policy Version"], CUSTOMER_POLICY_VERSION
+            )
+
+    def test_recovery_outcome_neutral_wording(self):
+        cases = {
+            "SUCCESSFUL": "The requested data was recovered successfully.",
+            "PARTIAL": "Some of the requested data was recovered.",
+            "UNSUCCESSFUL": "The requested data could not be recovered.",
+        }
+        for outcome, wording in cases.items():
+            with self.subTest(outcome=outcome):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    case_dir = _case_dir(temp_dir)
+                    _write_manifest(
+                        case_dir, self._completed_manifest(outcome=outcome)
+                    )
+
+                    report = Hermes(_session(case_dir)).build_customer_report()
+
+                    self.assertEqual(
+                        report["Recovery Outcome"]["Outcome"], wording
+                    )
+
+    def test_recovery_outcome_missing_is_neutral(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_customer_report()
+
+            self.assertEqual(
+                report["Recovery Outcome"]["Outcome"],
+                "No recovery outcome has been recorded.",
+            )
+
+    def test_separate_completed_and_generated_timestamps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+
+            report = Hermes(_session(case_dir)).build_customer_report()
+            case_info = report["Case Information"]
+
+            self.assertEqual(case_info["Case Completed"], "2026-07-17T09:00:00")
+            self.assertEqual(case_info["Report Generated"], FIXED_GENERATED_AT)
+            self.assertNotEqual(
+                case_info["Case Completed"], case_info["Report Generated"]
+            )
+
+    def test_destination_not_exposed_as_received(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+
+            hermes = Hermes(_session(case_dir))
+            report = hermes.build_customer_report()
+            markdown = hermes.build_customer_markdown()
+
+            self.assertEqual(
+                report["Device Received"]["Number of Devices Received"], 1
+            )
+            self.assertNotIn("WD Elements", markdown)
+            self.assertNotIn("/dev/sdc", markdown)
+            self.assertNotIn("WX12AB34CD56", markdown)
+            self.assertNotIn("Destination", markdown)
+
+    def test_internal_and_technical_fields_not_exposed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            _write_canonical_acquisition_artifacts(case_dir)
+            _write_recovered_artifacts(case_dir)
+
+            markdown = Hermes(_session(case_dir)).build_customer_markdown()
+
+            forbidden = [
+                "/dev/sdb",
+                "S4EWNF0M803123A",
+                "SATA",
+                "ext4",
+                "APPROVED",
+                "External device.",
+                "LOW",
+                "+49 170 0000000",
+                "jane@example.com",
+                "Sent to another lab called DataMedic first",
+                "source.img",
+                "SHA-256",
+                "abc123",
+                "PhotoRec",
+                "photorec",
+                "recup",
+                "SMART",
+                "audit",
+            ]
+            for term in forbidden:
+                self.assertNotIn(term, markdown)
+
+    def test_no_recovery_operation_claim_from_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            # Recovered artifacts exist on disk but no image and no operation
+            # record. HERMES must not claim a recovery operation occurred.
+            _write_recovered_artifacts(case_dir)
+
+            hermes = Hermes(_session(case_dir))
+            report = hermes.build_customer_report()
+            markdown = hermes.build_customer_markdown()
+
+            self.assertEqual(
+                list(report["Work Performed"].keys()), ["Imaging"]
+            )
+            self.assertEqual(
+                report["Work Performed"]["Imaging"],
+                CUSTOMER_IMAGING_NOT_PERFORMED,
+            )
+
+            self.assertEqual(report["Files Recovered"]["Recovered Items"], 2)
+
+            work_section = self._work_performed_section(markdown)
+            self.assertNotIn("PhotoRec", work_section)
+            self.assertNotIn("recovery operation", work_section.lower())
+            self.assertNotIn("recovered", work_section.lower())
+
+    def test_work_performed_reports_canonical_imaging(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            _write_canonical_acquisition_artifacts(case_dir)
+
+            report = Hermes(_session(case_dir)).build_customer_report()
+
+            self.assertEqual(
+                report["Work Performed"]["Imaging"], CUSTOMER_IMAGING_COMPLETED
+            )
+
+    def test_work_performed_all_acquisition_states_distinguishable(self):
+        # Every authoritative acquisition state must map to exactly one of the
+        # three neutral customer-facing imaging statements.
+        state_expectations = {
+            "no_acquisition": CUSTOMER_IMAGING_NOT_PERFORMED,
+            "inconsistent_artifacts": CUSTOMER_IMAGING_NOT_COMPLETED,
+            "invalid_map": CUSTOMER_IMAGING_NOT_COMPLETED,
+            "imaging_complete_fingerprint_missing": (
+                CUSTOMER_IMAGING_NOT_COMPLETED
+            ),
+            "incomplete_ddrescue": CUSTOMER_IMAGING_NOT_COMPLETED,
+            "completed_canonical": CUSTOMER_IMAGING_COMPLETED,
+        }
+
+        for state, expected in state_expectations.items():
+            with self.subTest(state=state):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    case_dir = _case_dir(temp_dir)
+                    _write_manifest(case_dir, self._completed_manifest())
+                    session = _session(case_dir)
+
+                    with mock.patch(
+                        "modules.hermes.classify_acquisition_state",
+                        return_value={"state": state},
+                    ) as classify_mock:
+                        report = Hermes(session).build_customer_report()
+
+                    classify_mock.assert_called_once_with(session.recovery_path)
+                    self.assertEqual(
+                        report["Work Performed"]["Imaging"], expected
+                    )
+
+        # The three customer-facing statements are themselves distinct.
+        self.assertEqual(
+            len(
+                {
+                    CUSTOMER_IMAGING_COMPLETED,
+                    CUSTOMER_IMAGING_NOT_COMPLETED,
+                    CUSTOMER_IMAGING_NOT_PERFORMED,
+                }
+            ),
+            3,
+        )
+
+    def test_missing_data_placeholders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+
+            report = Hermes(_session(case_dir)).build_customer_report()
+
+            case_info = report["Case Information"]
+            self.assertEqual(case_info["Case Number"], "REC-2026-000001")
+            self.assertEqual(case_info["Customer Name"], "Not recorded")
+            self.assertEqual(case_info["Case Completed"], "Not recorded")
+
+            device = report["Device Received"]
+            self.assertEqual(device["Device"], "Not recorded")
+            self.assertEqual(device["Capacity"], "Not recorded")
+            self.assertEqual(device["Number of Devices Received"], 0)
+
+            problem = report["Problem Description"]
+            self.assertEqual(problem["Requested Recovery"], "Not recorded")
+            self.assertEqual(problem["What Happened"], "Not recorded")
+            self.assertEqual(problem["Most Important Data"], "Not recorded")
+
+            self.assertEqual(
+                report["Recovery Outcome"]["Outcome"],
+                "No recovery outcome has been recorded.",
+            )
+            self.assertEqual(
+                report["Work Performed"]["Imaging"],
+                CUSTOMER_IMAGING_NOT_PERFORMED,
+            )
+            self.assertEqual(report["Files Recovered"]["Recovered Items"], 0)
+            self.assertEqual(report["Files Recovered"]["Recovered Data"], "0 B")
+
+    def test_build_report_customer_dispatches_to_customer_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            hermes = Hermes(_session(case_dir))
+
+            self.assertEqual(
+                hermes.build_report("customer"), hermes.build_customer_report()
+            )
+
+    def test_refuse_overwrite_existing_customer_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            hermes = Hermes(_session(case_dir))
+            hermes.save_customer_report()
+
+            with self.assertRaises(FileExistsError):
+                hermes.save_customer_report()
+
+    def test_customer_report_saved_at_correct_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            hermes = Hermes(_session(case_dir))
+
+            report_path = hermes.save_customer_report()
+
+            expected_path = case_dir / "reports" / CUSTOMER_REPORT_FILENAME
+            self.assertEqual(report_path, expected_path)
+            self.assertTrue(report_path.is_file())
+            self.assertEqual(
+                report_path.read_text(encoding="utf-8"),
+                hermes.build_customer_markdown(),
+            )
 
 
 if __name__ == "__main__":

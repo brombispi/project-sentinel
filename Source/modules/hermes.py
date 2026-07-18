@@ -26,6 +26,7 @@ from modules.argus import SmartEvidenceError, read_smart_evidence
 from modules.echo import AuditLogError, read_audit_log
 from modules.manifest import read_case_manifest
 from modules.report_formatter import ReportFormatter
+from modules.summary import format_bytes
 
 TECHNICIAN_REPORT_FILENAME = "technician_report.md"
 
@@ -44,6 +45,68 @@ TECHNICIAN_REPORT_SECTIONS = (
 IMAGE_ARTIFACT_RELATIVE_PATH = f"images/{IMAGE_FILENAME}"
 MAP_ARTIFACT_RELATIVE_PATH = f"images/{MAP_FILENAME}"
 FINGERPRINT_ARTIFACT_RELATIVE_PATH = f"evidence/{SHA256_FILENAME}"
+
+CUSTOMER_REPORT_FILENAME = "customer_report.md"
+
+CUSTOMER_REPORT_SECTIONS = (
+    "Case Information",
+    "Device Received",
+    "Problem Description",
+    "Work Performed",
+    "Recovery Outcome",
+    "Files Recovered",
+    "Recommendations",
+    "Disclaimer",
+)
+
+CUSTOMER_NOT_RECORDED = "Not recorded"
+
+CUSTOMER_OUTCOME_NOT_RECORDED = "No recovery outcome has been recorded."
+
+# Neutral, definition-only wording. HERMES does not infer reasons, quality,
+# percentages, or case-specific limitations from the recorded outcome.
+CUSTOMER_OUTCOME_WORDING = {
+    "SUCCESSFUL": "The requested data was recovered successfully.",
+    "PARTIAL": "Some of the requested data was recovered.",
+    "UNSUCCESSFUL": "The requested data could not be recovered.",
+}
+
+# Three neutral customer-facing imaging states derived from the authoritative
+# acquisition state. Only completed_canonical is the trusted complete state;
+# no_acquisition means imaging was not performed; every other authoritative
+# state means imaging was not completed. HERMES adds no detail beyond this.
+CUSTOMER_IMAGING_COMPLETED = (
+    "A complete forensic image of the device was created."
+)
+CUSTOMER_IMAGING_NOT_COMPLETED = (
+    "The forensic image of the device was not completed."
+)
+CUSTOMER_IMAGING_NOT_PERFORMED = (
+    "No forensic image of the device was created."
+)
+
+# Versioned, HERMES-owned policy content. This is not sourced from case.json.
+CUSTOMER_POLICY_VERSION = "1.0"
+
+CUSTOMER_RECOMMENDATIONS = (
+    "Verify that the recovered data is complete and opens correctly before "
+    "relying on it.",
+    "Contact us if you find missing or unreadable files in the recovered data.",
+    "Keep at least two independent backups of important data in separate "
+    "locations.",
+    "Store recovered data on a different device from the one that was "
+    "recovered.",
+)
+
+CUSTOMER_DISCLAIMER = (
+    "This report summarizes the data recovery work performed for your case.",
+    "Data recovery cannot be guaranteed, and results depend on the condition "
+    "of the device.",
+    "You are responsible for verifying the recovered data and maintaining your "
+    "own backups.",
+    "Recovered data is retained according to our data retention policy and is "
+    "then securely removed.",
+)
 
 
 def _coerce_display_value(value):
@@ -92,6 +155,31 @@ def _device_fields(manifest, block_key, prefix):
         f"{prefix} Filesystem": _coerce_display_value(device.get("filesystem")),
         f"{prefix} Role": _coerce_display_value(device.get("role")),
     }
+
+
+def _customer_value(value):
+    return value if value is not None else CUSTOMER_NOT_RECORDED
+
+
+def _neutral_outcome(outcome):
+    if outcome is None:
+        return CUSTOMER_OUTCOME_NOT_RECORDED
+    return CUSTOMER_OUTCOME_WORDING.get(outcome, CUSTOMER_OUTCOME_NOT_RECORDED)
+
+
+def _customer_imaging(state):
+    if state == "completed_canonical":
+        return CUSTOMER_IMAGING_COMPLETED
+    if state == "no_acquisition":
+        return CUSTOMER_IMAGING_NOT_PERFORMED
+    return CUSTOMER_IMAGING_NOT_COMPLETED
+
+
+def _customer_capacity(manifest):
+    size_bytes = _manifest_field(manifest, "device", "size_bytes")
+    if isinstance(size_bytes, int) and not isinstance(size_bytes, bool) and size_bytes > 0:
+        return format_bytes(size_bytes)
+    return _customer_value(_manifest_field(manifest, "device", "size"))
 
 
 class Hermes:
@@ -345,11 +433,134 @@ class Hermes:
         report_path.write_text(self.build_technician_markdown(), encoding="utf-8")
         return report_path
 
+    def _build_customer_case_information(self, manifest, generated_at):
+        return {
+            "Case Number": _customer_value(
+                _manifest_field(manifest, "session_id")
+            ),
+            "Customer Name": _customer_value(
+                _manifest_field(manifest, "case_contact", "name")
+            ),
+            "Case Completed": _customer_value(
+                _manifest_field(manifest, "completed_at")
+            ),
+            "Report Generated": generated_at,
+        }
+
+    def _build_device_received(self, manifest):
+        device = manifest.get("device")
+        device_present = isinstance(device, dict) and bool(device)
+
+        return {
+            "Device": _customer_value(
+                _manifest_field(manifest, "device", "model")
+            ),
+            "Capacity": _customer_capacity(manifest),
+            "Number of Devices Received": 1 if device_present else 0,
+        }
+
+    def _build_problem_description(self, manifest):
+        return {
+            "Requested Recovery": _customer_value(
+                _manifest_field(manifest, "intake", "recovery_request")
+            ),
+            "What Happened": _customer_value(
+                _manifest_field(manifest, "intake", "incident_description")
+            ),
+            "Most Important Data": _customer_value(
+                _manifest_field(manifest, "intake", "data_priority")
+            ),
+        }
+
+    def _build_customer_work_performed(self, acquisition_state):
+        return {
+            "Imaging": _customer_imaging(acquisition_state.get("state")),
+        }
+
+    def _build_customer_recovery_outcome(self, manifest):
+        outcome = _manifest_field(manifest, "recovery_outcome")
+        return {
+            "Outcome": _neutral_outcome(outcome),
+        }
+
+    def _build_files_recovered(self, recovered_summary):
+        return {
+            "Recovered Items": recovered_summary["recovered_file_count"],
+            "Recovered Data": format_bytes(
+                recovered_summary["recovered_size_bytes"]
+            ),
+        }
+
+    def _build_customer_recommendations(self):
+        return {
+            "Guidance": CUSTOMER_RECOMMENDATIONS,
+            "Policy Version": CUSTOMER_POLICY_VERSION,
+        }
+
+    def _build_customer_disclaimer(self):
+        return {
+            "Terms": CUSTOMER_DISCLAIMER,
+            "Policy Version": CUSTOMER_POLICY_VERSION,
+        }
+
     def build_customer_report(self):
         """
         Build the customer report for the current recovery session.
+
+        The customer report presents only customer-visible facts. Work
+        Performed states authoritative imaging facts only; it never infers a
+        recovery operation from recovered artifacts. Recovered-file figures are
+        observational and read through the owning ARCHIVE summary API.
         """
-        raise NotImplementedError
+        manifest = self._load_manifest()
+        generated_at = datetime.now()
+        acquisition_state = self._load_acquisition_state()
+        recovered_summary = self._load_recovered_summary()
+
+        return {
+            "Case Information": self._build_customer_case_information(
+                manifest, generated_at
+            ),
+            "Device Received": self._build_device_received(manifest),
+            "Problem Description": self._build_problem_description(manifest),
+            "Work Performed": self._build_customer_work_performed(
+                acquisition_state
+            ),
+            "Recovery Outcome": self._build_customer_recovery_outcome(manifest),
+            "Files Recovered": self._build_files_recovered(recovered_summary),
+            "Recommendations": self._build_customer_recommendations(),
+            "Disclaimer": self._build_customer_disclaimer(),
+        }
+
+    def build_customer_markdown(self):
+        """
+        Build a Markdown representation of the customer report.
+        """
+        report = self.build_customer_report()
+        return ReportFormatter().format_markdown(
+            "Customer Report",
+            report,
+            section_order=CUSTOMER_REPORT_SECTIONS,
+        )
+
+    def save_customer_report(self) -> Path:
+        """
+        Write the customer report as Markdown into the case reports directory.
+
+        Creates the reports directory when it does not exist. Raises
+        FileExistsError when customer_report.md is already present.
+        """
+        reports_dir = Path(self.session.recovery_path) / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        report_path = reports_dir / CUSTOMER_REPORT_FILENAME
+        if report_path.exists():
+            raise FileExistsError(
+                f"Customer report already exists: {report_path}"
+            )
+
+        report_path.write_text(self.build_customer_markdown(), encoding="utf-8")
+        return report_path
 
     def build_partner_report(self):
         """
