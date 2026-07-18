@@ -380,6 +380,72 @@ def collect_smart_report(device, output_path):
     return result
 
 
+SMART_EVIDENCE_FILENAME = "source.smart.txt"
+
+# Persisted content markers written by collect_smart_report when SMART
+# evidence could not be produced. Meaningful evidence never equals these.
+_SMART_UNAVAILABLE_MARKERS = (
+    "smartctl is not installed.",
+    "smartctl produced no output.",
+)
+
+
+class SmartEvidenceError(Exception):
+    """Raised when source.smart.txt cannot be read or is structurally invalid."""
+
+
+def read_smart_evidence(recovery_path):
+    """
+    Read persisted SMART evidence for a recovery case.
+
+    Read-only. Does not run smartctl. Reuses the existing overall-health
+    parser and does not interpret SMART attributes beyond it.
+    """
+
+    recovery_path = Path(recovery_path)
+    evidence_path = recovery_path / "evidence" / SMART_EVIDENCE_FILENAME
+    relative_path = f"evidence/{SMART_EVIDENCE_FILENAME}"
+
+    if not evidence_path.exists():
+        return None
+
+    if not evidence_path.is_file():
+        raise SmartEvidenceError(
+            f"source.smart.txt is not a regular file: {evidence_path}"
+        )
+
+    try:
+        content = evidence_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise SmartEvidenceError(
+            f"source.smart.txt is not valid UTF-8: {evidence_path}"
+        ) from error
+    except OSError as error:
+        raise SmartEvidenceError(
+            f"source.smart.txt could not be read: {evidence_path}"
+        ) from error
+
+    stripped = content.strip()
+
+    if not stripped:
+        raise SmartEvidenceError(
+            f"source.smart.txt is structurally invalid (empty): {evidence_path}"
+        )
+
+    overall_health = _parse_overall_health(content)
+    available = (
+        overall_health is not None
+        or stripped not in _SMART_UNAVAILABLE_MARKERS
+    )
+
+    return {
+        "present": True,
+        "available": available,
+        "relative_path": relative_path,
+        "overall_health": overall_health,
+    }
+
+
 def detect_devices():
     system_drive = get_system_drive()
     codex = Codex()
