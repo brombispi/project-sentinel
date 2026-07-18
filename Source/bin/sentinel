@@ -26,7 +26,13 @@ from modules.archive import (
     validate_source_identity_for_resume,
     verify_forensic_image,
 )
-from modules.echo import log_info, log_operator, log_warning, log_error
+from modules.echo import (
+    log_info,
+    log_operator,
+    log_warning,
+    log_error,
+    set_log_failure_handler,
+)
 from modules.hermes import Hermes
 from modules.manifest import ManifestError, read_case_manifest, write_initial_case_manifest
 from modules.session_manager import save_case, update_status
@@ -70,6 +76,28 @@ from core.session import RecoverySession
 from core.status import RecoveryStatus
 
 init_language(PROJECT_ROOT)
+
+
+_warned_audit_failures = set()
+
+
+def _handle_audit_log_failure(result):
+    """
+    Presentation-boundary sink for ECHO audit-log write failures.
+
+    Warns the operator once per case that an audit entry could not be
+    recorded, without claiming the primary operation succeeded or failed.
+    """
+
+    recovery_path = result.get("recovery_path", "")
+
+    if recovery_path in _warned_audit_failures:
+        return
+
+    _warned_audit_failures.add(recovery_path)
+
+    print()
+    print(tr("error.audit_log_failed"))
 
 
 def _confirmed_yes(response):
@@ -2114,6 +2142,8 @@ def _run_archived_cases():
 
 
 def main():
+    set_log_failure_handler(_handle_audit_log_failure)
+
     print("==========================================")
     print(tr("startup.title"))
     print("==========================================")

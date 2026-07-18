@@ -259,6 +259,7 @@
 
     "error.assessment_missing": "Fortsetzen von {workflow_name} nicht möglich: gespeicherte Bewertung fehlt in case.json.",
     "error.source_missing": "Quellgerät ist nicht angeschlossen. Quellgerät anschliessen und Fall erneut öffnen.",
+    "error.audit_log_failed": "WARNUNG: Ein Eintrag im Prüfprotokoll konnte nicht aufgezeichnet werden. Der Vorgang selbst wurde möglicherweise trotzdem abgeschlossen. Prüfprotokoll des Falls und dessen Speicherort überprüfen.",
 
     "load.message.manifest_error": "{message}",
     "load.message.case_path_not_accessible": "Wiederherstellungsfallpfad ist nicht zugänglich: {case_path}",

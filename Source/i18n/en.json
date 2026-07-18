@@ -259,6 +259,7 @@
 
     "error.assessment_missing": "Cannot continue {workflow_name}: persisted assessment is missing from case.json.",
     "error.source_missing": "Source device is not connected. Connect the source device and open the case again.",
+    "error.audit_log_failed": "WARNING: An audit log entry could not be recorded. The operation itself may still have completed. Check the case audit log and its storage location.",
 
     "load.message.manifest_error": "{message}",
     "load.message.case_path_not_accessible": "Recovery case path is not accessible: {case_path}",
