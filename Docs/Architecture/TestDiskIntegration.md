@@ -549,8 +549,35 @@ The first executable slice supports **`execution_mode == "root"` only**:
 - Sentinel must already be root (`geteuid() == 0`); it drops to the confined
   recovery identity with `setpriv` (the only supported `privilege_drop_mechanism`)
   and re-execs TestDisk. No `sudo` wrapping and no shell are used, and the argv is
-  built entirely in code (`setpriv --reuid=<uid> --regid=<gid> --clear-groups --
-  testdisk /log working/testdisk.img`).
+  built entirely in code (`<abs setpriv> --reuid=<uid> --regid=<gid>
+  --clear-groups -- <abs testdisk> /log working/testdisk.img`).
+- **Executable paths are resolved and validated during preparation, not at
+  launch.** `prepare_testdisk_execution(...)` resolves both `setpriv` and
+  `testdisk` to absolute paths via an injectable command resolver
+  (`shutil.which` by default) and validates each resolved path with `lstat`: it
+  must be a non-empty, absolute path pointing at a **regular, executable** file.
+  A symlinked executable is rejected — that symlink rejection is the exact trust
+  boundary, and deployments must provide real `setpriv`/`testdisk` binaries (the
+  reference host does, §11). The argv is built from these **absolute** paths and
+  stored in the preparation result; execution never runs a bare `setpriv`/
+  `testdisk` name and performs **no** PATH lookup. Consequently a `PATH` change
+  after preparation cannot redirect execution to a different binary (closing the
+  PATH-swap / prep→exec TOCTOU window).
+- **The child environment is explicitly minimized during preparation.** A private
+  helper builds a fresh environment (without mutating the source) whose `PATH` is
+  a fixed safe system path (`/usr/sbin:/usr/bin:/sbin:/bin`) and which carries
+  over only the interactive-TUI/locale variables `TERM`, `LANG`, `LC_ALL`, and
+  `LC_CTYPE`, and only when they are present and non-empty. Everything else —
+  notably `PYTHONPATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, arbitrary `SENTINEL_*`
+  variables, and `HOME` — is dropped. Any retained value containing a NUL byte
+  fails closed before launch. The built environment is stored in the preparation
+  result; `execute_testdisk_recovery(...)` passes it verbatim
+  (`runner(argv, cwd=cwd, env=child_env)`) and never rebuilds it from the live
+  process environment.
+- **Canonical-image hardening:** the canonical image is validated with `lstat`
+  and must be a **regular file** owned by neither the recovery uid nor gid, with
+  no group/other permission bits. A symlink at the canonical path is rejected
+  even if its target would otherwise satisfy `root:root 0400`.
 - `sudo` and `external` remain **accepted configuration** values but are refused
   at runtime with distinct fail-closed codes
   (`TESTDISK_EXECUTION_MODE_SUDO_NOT_EXECUTABLE_YET`,
@@ -566,8 +593,17 @@ The first executable slice supports **`execution_mode == "root"` only**:
 - All prerequisite validation and privileged preparation complete **before** any
   lifecycle change: `prepare_testdisk_execution(...)` performs no status
   transition, appends no `recovery_operations` record, and persists nothing;
-  `execute_testdisk_recovery(...)` only runs the prepared argv and summarizes
-  `recovered/testdisk/`.
+  `execute_testdisk_recovery(...)` only runs the prepared argv with the prepared
+  minimal environment and summarizes `recovered/testdisk/`.
+- **SENTINEL remains responsible for replace-confirmation.** ARCHIVE overwrites
+  an existing `working/testdisk.img` when preparing the working copy; the
+  future lifecycle/menu layer owns the decision to confirm before replacing an
+  existing working copy. Repeated preparation with valid pre-existing output/log
+  targets is idempotent (the targets are accepted, not recreated).
+- **These launch-hardening protections are implemented but still inert:** no
+  production path calls `prepare_testdisk_execution` or
+  `execute_testdisk_recovery` yet — they become live only with the future
+  lifecycle/menu wiring.
 
 ---
 

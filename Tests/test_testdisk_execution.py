@@ -1,3 +1,4 @@
+import os
 import stat
 import sys
 import tempfile
@@ -64,7 +65,8 @@ class FakeExecFs:
     EVIDENCE_DIR = "/case/evidence"
     LOG = "/case/evidence/testdisk.log"
 
-    def __init__(self, *, canonical_mode=0o400, source_size=100,
+    def __init__(self, *, canonical_mode=0o400, canonical_kind="file",
+                 canonical_is_symlink=False, source_size=100,
                  bavail=10 ** 9, fail_on=None):
         self.fail_on = set(fail_on or [])
         self.bavail = bavail
@@ -76,9 +78,25 @@ class FakeExecFs:
                 "is_symlink": False,
             }
         self.objects[self.CANONICAL] = {
-            "kind": "file", "uid": 0, "gid": 0, "mode": canonical_mode,
-            "size": source_size, "is_symlink": False,
+            "kind": canonical_kind, "uid": 0, "gid": 0, "mode": canonical_mode,
+            "size": source_size, "is_symlink": canonical_is_symlink,
         }
+        # Resolved absolute executables (regular, executable, not symlinks).
+        for exe in (SETPRIV_PATH, TESTDISK_PATH):
+            self.objects[exe] = {
+                "kind": "file", "uid": 0, "gid": 0, "mode": 0o755, "size": 0,
+                "is_symlink": False,
+            }
+
+    def resolver(self, missing=()):
+        mapping = {"setpriv": SETPRIV_PATH, "testdisk": TESTDISK_PATH}
+
+        def _resolve(name):
+            if name in missing:
+                return None
+            return mapping.get(name)
+
+        return _resolve
 
     def _maybe_fail(self, op):
         if op in self.fail_on:
@@ -185,63 +203,92 @@ def _make_session():
                            status="RECOVERING")
 
 
-def _prepare(fs, *, config=None, geteuid=lambda: 0,
-             command_exists=lambda name: True, identity_resolver=None):
+def _prepare(fs, *, config=None, geteuid=lambda: 0, command_resolver=None,
+             identity_resolver=None, source_environ=None):
     return prepare_testdisk_execution(
         _make_session(),
         config if config is not None else _valid_config(),
         identity_resolver=identity_resolver or _identity(),
-        command_exists=command_exists,
+        command_resolver=command_resolver or fs.resolver(),
         geteuid=geteuid,
         stat_provider=fs.stat,
         statvfs_provider=fs.statvfs,
+        lstat_provider=fs.lstat,
+        source_environ=source_environ if source_environ is not None
+        else {"TERM": "xterm-256color"},
         fs_ops=fs,
     )
 
 
+SETPRIV_PATH = "/usr/bin/setpriv"
+TESTDISK_PATH = "/usr/bin/testdisk"
+
+
 class CommandBuilderTests(unittest.TestCase):
-    def test_exact_argv(self):
+    def test_exact_argv_uses_absolute_paths(self):
         argv = _build_testdisk_root_command(
-            "setpriv", 999, 991, "/case/working/testdisk.img"
+            SETPRIV_PATH, TESTDISK_PATH, 999, 991,
+            "/case/working/testdisk.img",
         )
         self.assertEqual(
             argv,
             [
-                "setpriv",
+                "/usr/bin/setpriv",
                 "--reuid=999",
                 "--regid=991",
                 "--clear-groups",
                 "--",
-                "testdisk",
+                "/usr/bin/testdisk",
                 "/log",
                 "/case/working/testdisk.img",
             ],
         )
 
+    def test_bare_executable_names_never_appear(self):
+        argv = _build_testdisk_root_command(
+            SETPRIV_PATH, TESTDISK_PATH, 999, 991, "/w/img"
+        )
+        self.assertEqual(argv[0], SETPRIV_PATH)
+        self.assertEqual(argv[5], TESTDISK_PATH)
+        self.assertNotIn("setpriv", argv)
+        self.assertNotIn("testdisk", argv)
+
     def test_integer_uid_gid_rendering(self):
-        argv = _build_testdisk_root_command("setpriv", 1234, 5678, "/w/img")
+        argv = _build_testdisk_root_command(
+            SETPRIV_PATH, TESTDISK_PATH, 1234, 5678, "/w/img"
+        )
         self.assertEqual(argv[1], "--reuid=1234")
         self.assertEqual(argv[2], "--regid=5678")
 
     def test_root_uid_refused(self):
         with self.assertRaises(ValueError):
-            _build_testdisk_root_command("setpriv", 0, 991, "/w/img")
+            _build_testdisk_root_command(SETPRIV_PATH, TESTDISK_PATH, 0, 991,
+                                         "/w/img")
 
     def test_root_gid_refused(self):
         with self.assertRaises(ValueError):
-            _build_testdisk_root_command("setpriv", 999, 0, "/w/img")
+            _build_testdisk_root_command(SETPRIV_PATH, TESTDISK_PATH, 999, 0,
+                                         "/w/img")
 
     def test_non_integer_uid_refused(self):
         with self.assertRaises(ValueError):
-            _build_testdisk_root_command("setpriv", "999", 991, "/w/img")
+            _build_testdisk_root_command(SETPRIV_PATH, TESTDISK_PATH, "999",
+                                         991, "/w/img")
 
     def test_bool_uid_refused(self):
         with self.assertRaises(ValueError):
-            _build_testdisk_root_command("setpriv", True, 991, "/w/img")
+            _build_testdisk_root_command(SETPRIV_PATH, TESTDISK_PATH, True, 991,
+                                         "/w/img")
 
-    def test_non_setpriv_mechanism_refused(self):
+    def test_relative_setpriv_path_refused(self):
         with self.assertRaises(ValueError):
-            _build_testdisk_root_command("sudo", 999, 991, "/w/img")
+            _build_testdisk_root_command("bin/setpriv", TESTDISK_PATH, 999, 991,
+                                         "/w/img")
+
+    def test_relative_testdisk_path_refused(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_root_command(SETPRIV_PATH, "bin/testdisk", 999, 991,
+                                         "/w/img")
 
 
 class PrepareExecutionTests(unittest.TestCase):
@@ -259,19 +306,76 @@ class PrepareExecutionTests(unittest.TestCase):
         self.assertEqual(result["recovered_directory"],
                          "/case/recovered/testdisk")
         self.assertEqual(result["log_path"], "/case/evidence/testdisk.log")
+        self.assertEqual(result["setpriv_path"], SETPRIV_PATH)
+        self.assertEqual(result["testdisk_path"], TESTDISK_PATH)
         self.assertEqual(
             result["argv"],
             [
-                "setpriv",
+                SETPRIV_PATH,
                 "--reuid=999",
                 "--regid=991",
                 "--clear-groups",
                 "--",
-                "testdisk",
+                TESTDISK_PATH,
                 "/log",
                 "/case/working/testdisk.img",
             ],
         )
+        # Bare names never appear; the child env is present and minimal.
+        self.assertNotIn("setpriv", result["argv"])
+        self.assertNotIn("testdisk", result["argv"])
+        self.assertEqual(result["env"]["PATH"], "/usr/sbin:/usr/bin:/sbin:/bin")
+        self.assertEqual(result["env"]["TERM"], "xterm-256color")
+
+    def test_dangerous_env_dropped_and_source_not_mutated(self):
+        fs = FakeExecFs()
+        source = {
+            "TERM": "xterm", "LD_PRELOAD": "/tmp/evil.so",
+            "PYTHONPATH": "/tmp/py", "PATH": "/attacker/bin",
+        }
+        snapshot = dict(source)
+        result = _prepare(fs, source_environ=source)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["env"]["PATH"], "/usr/sbin:/usr/bin:/sbin:/bin")
+        self.assertNotIn("LD_PRELOAD", result["env"])
+        self.assertNotIn("PYTHONPATH", result["env"])
+        self.assertEqual(source, snapshot)
+
+    def test_nul_in_env_fails_closed(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, source_environ={"TERM": "xterm\x00evil"})
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_ENV_INVALID")
+
+    def test_symlinked_executable_refused(self):
+        fs = FakeExecFs()
+        fs.objects[SETPRIV_PATH]["is_symlink"] = True
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_IS_SYMLINK")
+
+    def test_relative_resolver_result_refused(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, command_resolver=lambda name: "bin/" + name)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_ABSOLUTE")
+
+    def test_canonical_symlink_refused(self):
+        fs = FakeExecFs(canonical_is_symlink=True)
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_IS_SYMLINK")
+
+    def test_canonical_directory_refused(self):
+        fs = FakeExecFs(canonical_kind="dir")
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_NOT_REGULAR")
+
+    def test_prepared_artifacts_have_required_ownership_and_modes(self):
+        fs = FakeExecFs()
+        result = _prepare(fs)
+        self.assertTrue(result["success"], result)
         # Prepared artifacts have the required ownership and exact modes.
         self.assertEqual(fs.objects[fs.WORKING_IMAGE]["mode"],
                          _TESTDISK_WORKING_COPY_MODE)
@@ -291,10 +395,12 @@ class PrepareExecutionTests(unittest.TestCase):
             session,
             _valid_config(),
             identity_resolver=_identity(),
-            command_exists=lambda name: True,
+            command_resolver=fs.resolver(),
             geteuid=lambda: 0,
             stat_provider=fs.stat,
             statvfs_provider=fs.statvfs,
+            lstat_provider=fs.lstat,
+            source_environ={"TERM": "xterm"},
             fs_ops=fs,
         )
         # Status is untouched and no recovery-operations record was attached.
@@ -326,15 +432,15 @@ class PrepareExecutionTests(unittest.TestCase):
 
     def test_testdisk_missing_refused(self):
         fs = FakeExecFs()
-        result = _prepare(fs, command_exists=lambda name: name != "testdisk")
+        result = _prepare(fs, command_resolver=fs.resolver(missing={"testdisk"}))
         self.assertFalse(result["success"])
-        self.assertEqual(result["code"], "TESTDISK_BINARY_MISSING")
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_FOUND")
 
     def test_setpriv_missing_refused(self):
         fs = FakeExecFs()
-        result = _prepare(fs, command_exists=lambda name: name != "setpriv")
+        result = _prepare(fs, command_resolver=fs.resolver(missing={"setpriv"}))
         self.assertFalse(result["success"])
-        self.assertEqual(result["code"], "TESTDISK_DROP_MECHANISM_MISSING")
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_FOUND")
 
     def test_unsafe_identity_refused(self):
         fs = FakeExecFs()
@@ -393,9 +499,10 @@ class RecordingRunner:
 
 class ExecuteTestdiskRecoveryTests(unittest.TestCase):
     ARGV = [
-        "setpriv", "--reuid=999", "--regid=991", "--clear-groups", "--",
-        "testdisk", "/log", "/case/working/testdisk.img",
+        SETPRIV_PATH, "--reuid=999", "--regid=991", "--clear-groups", "--",
+        TESTDISK_PATH, "/log", "/case/working/testdisk.img",
     ]
+    CHILD_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "TERM": "xterm"}
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -409,7 +516,10 @@ class ExecuteTestdiskRecoveryTests(unittest.TestCase):
             "status": "prepared",
             "code": "TESTDISK_PREPARED",
             "message": "ok",
+            "setpriv_path": SETPRIV_PATH,
+            "testdisk_path": TESTDISK_PATH,
             "argv": list(self.ARGV),
+            "env": dict(self.CHILD_ENV),
             "cwd": str(Path(self._tmp.name) / "evidence"),
             "working_image_path": "/case/working/testdisk.img",
             "recovered_directory": str(self.testdisk_dir),
@@ -423,8 +533,33 @@ class ExecuteTestdiskRecoveryTests(unittest.TestCase):
         execute_testdisk_recovery(prep, runner=runner)
         self.assertEqual(len(runner.calls), 1)
         args, kwargs = runner.calls[0]
+        # Called exactly as runner(argv, cwd=cwd, env=child_env); no shell,
+        # capture_output, check, text, or redirected stdio.
         self.assertEqual(args, (self.ARGV,))
-        self.assertEqual(kwargs, {"cwd": prep["cwd"]})
+        self.assertEqual(kwargs, {"cwd": prep["cwd"], "env": self.CHILD_ENV})
+
+    def test_runner_receives_stored_env_not_live_environment(self):
+        self.testdisk_dir.mkdir(parents=True)
+        runner = RecordingRunner(returncode=0)
+        prep = self._preparation()
+        # Mutating the ambient environment after preparation must not change
+        # what execution passes: execution never rebuilds the env or looks up
+        # PATH again.
+        with mock.patch.dict(os.environ, {"PATH": "/attacker/bin",
+                                          "LD_PRELOAD": "/tmp/evil.so"}):
+            execute_testdisk_recovery(prep, runner=runner)
+        args, kwargs = runner.calls[0]
+        self.assertEqual(kwargs["env"], self.CHILD_ENV)
+        self.assertNotIn("LD_PRELOAD", kwargs["env"])
+        self.assertEqual(args[0], self.ARGV)
+
+    def test_missing_env_is_rejected(self):
+        runner = mock.Mock()
+        bad = self._preparation()
+        del bad["env"]
+        result = execute_testdisk_recovery(bad, runner=runner)
+        runner.assert_not_called()
+        self.assertEqual(result["code"], "TESTDISK_PREPARATION_INVALID")
 
     def test_zero_exit_is_success_ended(self):
         self.testdisk_dir.mkdir(parents=True)

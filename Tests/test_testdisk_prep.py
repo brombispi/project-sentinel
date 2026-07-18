@@ -1,5 +1,7 @@
+import os
 import stat
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,15 +14,20 @@ sys.path.insert(0, str(SOURCE_ROOT))
 # Tests import the private names explicitly, which is permitted.
 from modules.archive import (  # noqa: E402
     _TESTDISK_LOG_MODE,
+    _TESTDISK_PRESERVED_ENV_VARS,
     _TESTDISK_RECOVERED_DIR_MODE,
+    _TESTDISK_SAFE_PATH,
     _TESTDISK_WORKING_COPY_FILENAME,
     _TESTDISK_WORKING_COPY_MODE,
+    _DefaultTestdiskFsOps,
+    _build_testdisk_child_env,
     _check_working_free_space,
     _default_identity_resolver,
     _prepare_protected_target,
     _prepare_testdisk_output_targets,
     _prepare_testdisk_working_copy,
     _reject_unsafe_recovery_identity,
+    _resolve_executable,
     _resolve_recovery_identity,
     _validate_ancestors_traversable,
     _validate_canonical_protection,
@@ -43,6 +50,18 @@ def _stat(*, uid=0, gid=0, mode=0o400, size=0):
     # st_mode is stored with permission bits only in these tests; the helpers
     # mask with 0o777 / 0o077 / 0o001 so file-type bits are irrelevant here.
     return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=mode, st_size=size)
+
+
+def _lstat(*, uid=0, gid=0, perm=0o400, kind="file"):
+    # Include the S_IF* type bits so symlink/regular/type checks are exercised.
+    type_bits = {
+        "file": stat.S_IFREG,
+        "dir": stat.S_IFDIR,
+        "symlink": stat.S_IFLNK,
+        "fifo": stat.S_IFIFO,
+    }[kind]
+    return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=type_bits | perm,
+                           st_size=0)
 
 
 def _statvfs(*, bavail, frsize=4096):
@@ -357,7 +376,7 @@ class CanonicalProtectionTests(unittest.TestCase):
         result = _validate_canonical_protection(
             "/case/images/source.img",
             RECOVERY_IDENTITY,
-            stat_provider=lambda path: _stat(uid=0, gid=0, mode=0o400),
+            lstat_provider=lambda path: _lstat(uid=0, gid=0, perm=0o400),
         )
         self.assertTrue(result["success"])
         self.assertEqual(result["code"], "TESTDISK_CANONICAL_PROTECTED")
@@ -367,16 +386,50 @@ class CanonicalProtectionTests(unittest.TestCase):
             raise FileNotFoundError(path)
 
         result = _validate_canonical_protection(
-            "/case/images/source.img", RECOVERY_IDENTITY, stat_provider=_raise
+            "/case/images/source.img", RECOVERY_IDENTITY, lstat_provider=_raise
         )
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_CANONICAL_MISSING")
+
+    def test_symlinked_canonical_is_refused(self):
+        # A symlink is rejected even though its (faked) perms/owner would pass.
+        result = _validate_canonical_protection(
+            "/case/images/source.img",
+            RECOVERY_IDENTITY,
+            lstat_provider=lambda path: _lstat(
+                uid=0, gid=0, perm=0o400, kind="symlink"
+            ),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_IS_SYMLINK")
+
+    def test_directory_canonical_is_refused(self):
+        result = _validate_canonical_protection(
+            "/case/images/source.img",
+            RECOVERY_IDENTITY,
+            lstat_provider=lambda path: _lstat(
+                uid=0, gid=0, perm=0o400, kind="dir"
+            ),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_NOT_REGULAR")
+
+    def test_non_regular_canonical_is_refused(self):
+        result = _validate_canonical_protection(
+            "/case/images/source.img",
+            RECOVERY_IDENTITY,
+            lstat_provider=lambda path: _lstat(
+                uid=0, gid=0, perm=0o400, kind="fifo"
+            ),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_NOT_REGULAR")
 
     def test_canonical_owned_by_recovery_uid_is_refused(self):
         result = _validate_canonical_protection(
             "/case/images/source.img",
             RECOVERY_IDENTITY,
-            stat_provider=lambda path: _stat(uid=999, gid=0, mode=0o400),
+            lstat_provider=lambda path: _lstat(uid=999, gid=0, perm=0o400),
         )
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_CANONICAL_OWNED_BY_RECOVERY")
@@ -385,7 +438,7 @@ class CanonicalProtectionTests(unittest.TestCase):
         result = _validate_canonical_protection(
             "/case/images/source.img",
             RECOVERY_IDENTITY,
-            stat_provider=lambda path: _stat(uid=0, gid=991, mode=0o400),
+            lstat_provider=lambda path: _lstat(uid=0, gid=991, perm=0o400),
         )
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_CANONICAL_OWNED_BY_RECOVERY")
@@ -394,7 +447,7 @@ class CanonicalProtectionTests(unittest.TestCase):
         result = _validate_canonical_protection(
             "/case/images/source.img",
             RECOVERY_IDENTITY,
-            stat_provider=lambda path: _stat(uid=0, gid=0, mode=0o440),
+            lstat_provider=lambda path: _lstat(uid=0, gid=0, perm=0o440),
         )
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_CANONICAL_PERMISSIVE")
@@ -404,10 +457,139 @@ class CanonicalProtectionTests(unittest.TestCase):
             raise OSError("permission denied")
 
         result = _validate_canonical_protection(
-            "/case/images/source.img", RECOVERY_IDENTITY, stat_provider=_raise
+            "/case/images/source.img", RECOVERY_IDENTITY, lstat_provider=_raise
         )
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_CANONICAL_STAT_FAILED")
+
+
+class ResolveExecutableTests(unittest.TestCase):
+    ABS = "/usr/bin/setpriv"
+
+    def test_absolute_regular_executable_resolves(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: self.ABS,
+            lstat_provider=lambda path: _lstat(perm=0o755, kind="file"),
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_RESOLVED")
+        self.assertEqual(result["path"], self.ABS)
+
+    def test_missing_lookup_is_refused(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: None,
+            lstat_provider=lambda path: _lstat(perm=0o755),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_FOUND")
+
+    def test_empty_lookup_is_refused(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: "",
+            lstat_provider=lambda path: _lstat(perm=0o755),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_FOUND")
+
+    def test_relative_lookup_is_refused(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: "bin/setpriv",
+            lstat_provider=lambda path: _lstat(perm=0o755),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_ABSOLUTE")
+
+    def test_non_regular_lookup_is_refused(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: self.ABS,
+            lstat_provider=lambda path: _lstat(perm=0o755, kind="dir"),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_REGULAR")
+
+    def test_non_executable_lookup_is_refused(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: self.ABS,
+            lstat_provider=lambda path: _lstat(perm=0o644, kind="file"),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_NOT_EXECUTABLE")
+
+    def test_symlinked_executable_is_refused(self):
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: self.ABS,
+            lstat_provider=lambda path: _lstat(perm=0o777, kind="symlink"),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_IS_SYMLINK")
+
+    def test_lstat_failure_is_refused(self):
+        def _raise(path):
+            raise OSError("denied")
+
+        result = _resolve_executable(
+            "setpriv",
+            command_resolver=lambda name: self.ABS,
+            lstat_provider=_raise,
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_EXECUTABLE_STAT_FAILED")
+
+
+class BuildChildEnvTests(unittest.TestCase):
+    def test_fixed_safe_path_is_present(self):
+        env = _build_testdisk_child_env({})
+        self.assertEqual(env["PATH"], _TESTDISK_SAFE_PATH)
+
+    def test_tui_and_locale_variables_retained_when_non_empty(self):
+        source = {
+            "TERM": "xterm-256color",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "C",
+            "LC_CTYPE": "en_US.UTF-8",
+        }
+        env = _build_testdisk_child_env(source)
+        for name in _TESTDISK_PRESERVED_ENV_VARS:
+            self.assertEqual(env[name], source[name])
+
+    def test_empty_values_are_omitted(self):
+        env = _build_testdisk_child_env({"TERM": "", "LANG": "en_US.UTF-8"})
+        self.assertNotIn("TERM", env)
+        self.assertEqual(env["LANG"], "en_US.UTF-8")
+
+    def test_dangerous_and_unrelated_variables_omitted(self):
+        source = {
+            "TERM": "xterm",
+            "LD_PRELOAD": "/tmp/evil.so",
+            "LD_LIBRARY_PATH": "/tmp/lib",
+            "PYTHONPATH": "/tmp/py",
+            "HOME": "/root",
+            "SENTINEL_SECRET": "x",
+            "PATH": "/attacker/bin",
+        }
+        env = _build_testdisk_child_env(source)
+        for omitted in ("LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH",
+                        "HOME", "SENTINEL_SECRET"):
+            self.assertNotIn(omitted, env)
+        # The inbound PATH is replaced by the fixed safe PATH, not propagated.
+        self.assertEqual(env["PATH"], _TESTDISK_SAFE_PATH)
+
+    def test_source_environment_is_not_mutated(self):
+        source = {"TERM": "xterm", "LD_PRELOAD": "/tmp/evil.so"}
+        snapshot = dict(source)
+        _build_testdisk_child_env(source)
+        self.assertEqual(source, snapshot)
+
+    def test_nul_byte_value_fails_closed(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_child_env({"TERM": "xterm\x00evil"})
 
 
 class RecoveryTargetTests(unittest.TestCase):
@@ -1043,6 +1225,147 @@ class PrepareTestdiskOutputTargetsTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn(self.DIR, fs.objects)
         self.assertNotIn("rmdir", fs.call_names())
+
+
+class _PostRenameFailFs(_DefaultTestdiskFsOps):
+    """Real filesystem operations, but the post-rename directory fsync fails."""
+
+    def fsync_dir(self, path):
+        raise OSError("simulated post-rename directory fsync failure")
+
+
+class RealFilesystemPreparationTests(unittest.TestCase):
+    """
+    Non-root-safe tests against the real _DefaultTestdiskFsOps: chown targets the
+    current uid/gid (a non-root process may chown to itself), so secure creation,
+    exact modes, atomic rename, cleanup, and symlink refusal are exercised on a
+    real filesystem without root, sudo, setpriv, TestDisk, or device nodes.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.uid = os.getuid()
+        self.gid = os.getgid()
+        self.images = self.root / "images"
+        self.working = self.root / "working"
+        self.recovered_testdisk = self.root / "recovered" / "testdisk"
+        self.evidence = self.root / "evidence"
+        for directory in (self.images, self.working, self.root / "recovered",
+                          self.evidence):
+            directory.mkdir(parents=True, exist_ok=True)
+        self.source = self.images / "source.img"
+        self.source.write_bytes(b"CANONICAL-IMAGE-CONTENT")
+
+    def test_working_copy_secure_creation_rename_and_mode(self):
+        final = self.working / _TESTDISK_WORKING_COPY_FILENAME
+        result = _prepare_testdisk_working_copy(
+            self.source, self.working,
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertTrue(result["success"], result)
+        self.assertTrue(final.is_file())
+        self.assertEqual(stat.S_IMODE(final.stat().st_mode),
+                         _TESTDISK_WORKING_COPY_MODE)
+        self.assertEqual(final.stat().st_size, self.source.stat().st_size)
+        self.assertEqual(final.read_bytes(), self.source.read_bytes())
+        # No temporary file left behind.
+        tmp = final.with_name(final.name + ".tmp")
+        self.assertFalse(tmp.exists())
+
+    def test_stale_tmp_is_cleaned_before_creation(self):
+        final = self.working / _TESTDISK_WORKING_COPY_FILENAME
+        tmp = final.with_name(final.name + ".tmp")
+        tmp.write_bytes(b"stale")
+        result = _prepare_testdisk_working_copy(
+            self.source, self.working,
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertTrue(result["success"], result)
+        self.assertTrue(final.is_file())
+        self.assertFalse(tmp.exists())
+
+    def test_post_rename_failure_removes_final(self):
+        final = self.working / _TESTDISK_WORKING_COPY_FILENAME
+        tmp = final.with_name(final.name + ".tmp")
+        result = _prepare_testdisk_working_copy(
+            self.source, self.working,
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_PostRenameFailFs(),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_FSYNC_FAILED")
+        self.assertFalse(final.exists())
+        self.assertFalse(tmp.exists())
+
+    def test_output_targets_created_with_exact_modes(self):
+        result = _prepare_testdisk_output_targets(
+            self.recovered_testdisk, self.evidence / "testdisk.log",
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertTrue(result["success"], result)
+        self.assertTrue(self.recovered_testdisk.is_dir())
+        self.assertEqual(stat.S_IMODE(self.recovered_testdisk.stat().st_mode),
+                         _TESTDISK_RECOVERED_DIR_MODE)
+        log = self.evidence / "testdisk.log"
+        self.assertTrue(log.is_file())
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), _TESTDISK_LOG_MODE)
+
+    def test_symlinked_output_target_is_refused_and_not_deleted(self):
+        # recovered/testdisk is a symlink to another directory.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.recovered_testdisk.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(elsewhere, self.recovered_testdisk)
+        result = _prepare_protected_target(
+            self.recovered_testdisk, kind="dir",
+            owner_uid=self.uid, owner_gid=self.gid,
+            required_mode=_TESTDISK_RECOVERED_DIR_MODE,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_IS_SYMLINK")
+        # The symlink is not deleted, and its target still exists.
+        self.assertTrue(os.path.islink(self.recovered_testdisk))
+        self.assertTrue(elsewhere.is_dir())
+
+    def test_repeated_output_preparation_is_idempotent(self):
+        log = self.evidence / "testdisk.log"
+        first = _prepare_testdisk_output_targets(
+            self.recovered_testdisk, log,
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertTrue(first["success"], first)
+        # Second run: both targets pre-exist and are valid → accepted.
+        second = _prepare_testdisk_output_targets(
+            self.recovered_testdisk, log,
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertTrue(second["success"], second)
+        self.assertFalse(second["recovered_directory_created"])
+        self.assertFalse(second["log_created"])
+
+    def test_stale_final_working_copy_is_overwritten(self):
+        # ARCHIVE overwrites an existing working copy; the future SENTINEL layer
+        # owns the replace-confirmation decision (this test locks the current
+        # ARCHIVE behaviour so a change would be visible).
+        final = self.working / _TESTDISK_WORKING_COPY_FILENAME
+        final.write_bytes(b"OLD-STALE-WORKING-COPY")
+        result = _prepare_testdisk_working_copy(
+            self.source, self.working,
+            owner_uid=self.uid, owner_gid=self.gid,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertTrue(result["success"], result)
+        self.assertEqual(final.read_bytes(), self.source.read_bytes())
+        self.assertEqual(stat.S_IMODE(final.stat().st_mode),
+                         _TESTDISK_WORKING_COPY_MODE)
 
 
 if __name__ == "__main__":

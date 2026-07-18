@@ -1495,6 +1495,17 @@ _TESTDISK_LOG_FILENAME = "testdisk.log"
 # in sync with translator._TESTDISK_SUPPORTED_DROP_MECHANISMS; the command
 # builder refuses anything else.
 _TESTDISK_DROP_MECHANISM_SETPRIV = "setpriv"
+# Fixed, safe system PATH for the TestDisk child. A launch-time PATH inherited
+# from the (root) Sentinel environment could let a writable earlier entry shadow
+# `testdisk` when setpriv re-execs it as the confined identity; a fixed PATH plus
+# absolute-path execution (below) removes that vector. Reference Linux layout.
+_TESTDISK_SAFE_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
+# Environment variables preserved (only when present and non-empty) for the
+# interactive ncurses TUI and its locale/encoding. Everything else — notably
+# PYTHONPATH, LD_PRELOAD, LD_LIBRARY_PATH, and arbitrary SENTINEL_* variables —
+# is dropped. HOME is intentionally omitted: TestDisk does not require it for a
+# /log run with an explicit cwd, and omitting it avoids leaking a home path.
+_TESTDISK_PRESERVED_ENV_VARS = ("TERM", "LANG", "LC_ALL", "LC_CTYPE")
 # Conservative headroom required on the working/ filesystem in addition to a
 # full-size copy of the canonical image. Not host-specific; overridable per call.
 _TESTDISK_WORKING_COPY_SAFETY_MARGIN_BYTES = 64 * 1024 * 1024
@@ -1575,6 +1586,16 @@ def _default_stat_provider(path):
 
 def _default_statvfs_provider(path):
     return os.statvfs(path)
+
+
+def _default_command_resolver(name):
+    # Resolve a command name to its absolute path via PATH (or None if absent).
+    return shutil.which(name)
+
+
+def _default_lstat_provider(path):
+    # lstat (not stat) so a symlink is reported as a symlink and never followed.
+    return os.lstat(path)
 
 
 def _resolve_recovery_identity(
@@ -1799,18 +1820,21 @@ def _validate_canonical_protection(
     canonical_image_path,
     recovery_identity,
     *,
-    stat_provider=_default_stat_provider,
+    lstat_provider=_default_lstat_provider,
 ):
     """
     Validate that the canonical image is present and inaccessible to the
-    recovery identity: it must not be owned by the recovery uid/gid and must not
-    grant any group/other permission bits. Fail-closed.
+    recovery identity. The image is inspected with lstat (never followed), so a
+    symlink at the canonical path is rejected even if its target would satisfy
+    the owner/permission checks; the object must be a regular file. It must also
+    not be owned by the recovery uid/gid and must not grant any group/other
+    permission bits. Fail-closed.
     """
 
     path = str(canonical_image_path)
 
     try:
-        info = stat_provider(path)
+        info = lstat_provider(path)
     except FileNotFoundError:
         return _testdisk_result(
             False,
@@ -1826,6 +1850,24 @@ def _validate_canonical_protection(
             f"Canonical image could not be inspected: {error}",
             status="refused",
             display_args={"path": path, "error": str(error)},
+        )
+
+    if stat.S_ISLNK(info.st_mode):
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_IS_SYMLINK",
+            f"Canonical image is a symlink; refusing to use it: {path}",
+            status="refused",
+            display_args={"path": path},
+        )
+
+    if not stat.S_ISREG(info.st_mode):
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_NOT_REGULAR",
+            f"Canonical image is not a regular file: {path}",
+            status="refused",
+            display_args={"path": path},
         )
 
     if info.st_uid == recovery_identity["uid"] or (
@@ -2630,30 +2672,148 @@ def _prepare_testdisk_output_targets(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_executable(
+    name,
+    *,
+    command_resolver=_default_command_resolver,
+    lstat_provider=_default_lstat_provider,
+):
+    """
+    Resolve a required executable to a validated absolute path so execution never
+    performs a PATH lookup on a bare name (closing the setpriv/testdisk PATH-swap
+    and prep→exec TOCTOU vectors).
+
+    The lookup result must be a non-empty, absolute path; lstat (never followed)
+    must show a regular file with at least one executable bit. A symlinked
+    executable is rejected — deployments must provide real setpriv/testdisk
+    binaries (the reference host does, §11); that symlink rejection is the exact
+    trust boundary. Fail-closed on every other outcome. command_resolver stays
+    injectable for unit tests.
+    """
+
+    resolved = command_resolver(name)
+
+    if not resolved or not isinstance(resolved, str):
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTABLE_NOT_FOUND",
+            f"Required executable not found on PATH: {name}",
+            status="refused",
+            display_args={"name": name},
+        )
+
+    if not os.path.isabs(resolved):
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTABLE_NOT_ABSOLUTE",
+            f"Resolved executable path is not absolute: {resolved}",
+            status="refused",
+            display_args={"name": name, "path": resolved},
+        )
+
+    try:
+        info = lstat_provider(resolved)
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTABLE_STAT_FAILED",
+            f"Resolved executable could not be inspected: {error}",
+            status="refused",
+            display_args={"name": name, "path": resolved, "error": str(error)},
+        )
+
+    if stat.S_ISLNK(info.st_mode):
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTABLE_IS_SYMLINK",
+            f"Resolved executable is a symlink; refusing it: {resolved}",
+            status="refused",
+            display_args={"name": name, "path": resolved},
+        )
+
+    if not stat.S_ISREG(info.st_mode):
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTABLE_NOT_REGULAR",
+            f"Resolved executable is not a regular file: {resolved}",
+            status="refused",
+            display_args={"name": name, "path": resolved},
+        )
+
+    if not (stat.S_IMODE(info.st_mode) & 0o111):
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTABLE_NOT_EXECUTABLE",
+            f"Resolved executable is not executable: {resolved}",
+            status="refused",
+            display_args={"name": name, "path": resolved},
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_EXECUTABLE_RESOLVED",
+        f"Executable resolved: {resolved}",
+        status="ok",
+        path=resolved,
+    )
+
+
+def _build_testdisk_child_env(source_env):
+    """
+    Build an explicit, minimal environment for the TestDisk child from an
+    injected source environment, without mutating the source.
+
+    PATH is forced to a fixed safe system path (_TESTDISK_SAFE_PATH). Only the
+    interactive-TUI/locale variables in _TESTDISK_PRESERVED_ENV_VARS are carried
+    over, and only when present and non-empty. Everything else (PYTHONPATH,
+    LD_PRELOAD, LD_LIBRARY_PATH, arbitrary SENTINEL_* variables, HOME, …) is
+    dropped. Any retained value (or its name) containing a NUL byte fails closed
+    with ValueError, before the child could ever be launched.
+    """
+
+    child = {"PATH": _TESTDISK_SAFE_PATH}
+
+    for name in _TESTDISK_PRESERVED_ENV_VARS:
+        value = source_env.get(name)
+        if not value:
+            continue
+        if "\x00" in name or "\x00" in value:
+            raise ValueError(
+                f"Environment variable {name!r} contains a NUL byte"
+            )
+        child[name] = value
+
+    return child
+
+
 def _build_testdisk_root_command(
-    mechanism,
+    setpriv_path,
+    testdisk_path,
     recovery_uid,
     recovery_gid,
     working_image_path,
 ):
     """
-    Build the exact root-mode TestDisk argv (list form, no shell). The drop is
-    performed by setpriv, which clears supplementary groups and re-execs TestDisk
-    as the confined recovery identity:
+    Build the exact root-mode TestDisk argv (list form, no shell) from already
+    resolved ABSOLUTE executable paths. setpriv drops to the confined recovery
+    identity, clears supplementary groups, and re-execs TestDisk:
 
-        setpriv --reuid=<uid> --regid=<gid> --clear-groups -- \
-            testdisk /log <working-image-path>
+        <abs setpriv> --reuid=<uid> --regid=<gid> --clear-groups -- \
+            <abs testdisk> /log <working-image-path>
 
-    Defensive pure helper: the caller must have already validated the mechanism
-    (setpriv), the identity (non-root integer uid/gid), and the working target
-    (via _validate_execution_target). Raises ValueError on any invalid input so
-    a malformed command can never be constructed.
+    Defensive pure helper: the caller must have already resolved/validated both
+    executables (via _resolve_executable), the identity (non-root integer
+    uid/gid), and the working target (via _validate_execution_target). Raises
+    ValueError on any invalid input so a malformed or non-absolute command can
+    never be constructed, and so bare executable names can never be executed.
     """
 
-    if mechanism != _TESTDISK_DROP_MECHANISM_SETPRIV:
-        raise ValueError(
-            f"Unsupported privilege-drop mechanism: {mechanism!r}"
-        )
+    setpriv = str(setpriv_path)
+    testdisk = str(testdisk_path)
+    if not os.path.isabs(setpriv):
+        raise ValueError("setpriv path must be absolute")
+    if not os.path.isabs(testdisk):
+        raise ValueError("testdisk path must be absolute")
 
     if isinstance(recovery_uid, bool) or not isinstance(recovery_uid, int):
         raise ValueError("recovery uid must be an integer")
@@ -2667,12 +2827,12 @@ def _build_testdisk_root_command(
         raise ValueError("working image path must be provided")
 
     return [
-        "setpriv",
+        setpriv,
         f"--reuid={recovery_uid}",
         f"--regid={recovery_gid}",
         "--clear-groups",
         "--",
-        "testdisk",
+        testdisk,
         "/log",
         working,
     ]
@@ -2753,10 +2913,12 @@ def prepare_testdisk_execution(
     testdisk_config,
     *,
     identity_resolver=_default_identity_resolver,
-    command_exists=_default_command_exists,
+    command_resolver=_default_command_resolver,
     geteuid=_default_geteuid,
     stat_provider=_default_stat_provider,
     statvfs_provider=_default_statvfs_provider,
+    lstat_provider=_default_lstat_provider,
+    source_environ=None,
     fs_ops=None,
 ):
     """
@@ -2767,12 +2929,16 @@ def prepare_testdisk_execution(
 
     On success returns a structured result (status "prepared") carrying the
     normalized data execute_testdisk_recovery() needs: recovery uid/gid, the
-    exact argv, the cwd (evidence dir), the working image path, the recovered
-    directory path, and the log path. Any failure returns a fail-closed result
-    with a distinct code and performs no partial, unsafe state.
+    resolved ABSOLUTE setpriv/testdisk paths, the exact argv built from them, the
+    minimal child environment, the cwd (evidence dir), the working image path,
+    the recovered directory path, and the log path. Any failure returns a
+    fail-closed result with a distinct code and performs no partial, unsafe
+    state.
     """
 
     fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
+    if source_environ is None:
+        source_environ = os.environ
 
     structure_error = _validate_testdisk_config_structure(testdisk_config)
     if structure_error is not None:
@@ -2825,14 +2991,6 @@ def prepare_testdisk_execution(
             status="refused",
         )
 
-    if not command_exists("testdisk"):
-        return _testdisk_result(
-            False,
-            "TESTDISK_BINARY_MISSING",
-            "TestDisk is not installed (not found on PATH).",
-            status="refused",
-        )
-
     if mechanism != _TESTDISK_DROP_MECHANISM_SETPRIV:
         return _testdisk_result(
             False,
@@ -2842,11 +3000,23 @@ def prepare_testdisk_execution(
             display_args={"mechanism": mechanism},
         )
 
-    mechanism_result = _validate_privilege_drop_mechanism(
-        mechanism, command_exists=command_exists
+    setpriv_result = _resolve_executable(
+        _TESTDISK_DROP_MECHANISM_SETPRIV,
+        command_resolver=command_resolver,
+        lstat_provider=lstat_provider,
     )
-    if not mechanism_result["success"]:
-        return mechanism_result
+    if not setpriv_result["success"]:
+        return setpriv_result
+    setpriv_path = setpriv_result["path"]
+
+    testdisk_result = _resolve_executable(
+        "testdisk",
+        command_resolver=command_resolver,
+        lstat_provider=lstat_provider,
+    )
+    if not testdisk_result["success"]:
+        return testdisk_result
+    testdisk_path = testdisk_result["path"]
 
     identity_result = _resolve_recovery_identity(
         account, identity_resolver=identity_resolver
@@ -2869,7 +3039,7 @@ def prepare_testdisk_execution(
     log_path = evidence_dir / _TESTDISK_LOG_FILENAME
 
     canonical_result = _validate_canonical_protection(
-        canonical_image, identity, stat_provider=stat_provider
+        canonical_image, identity, lstat_provider=lstat_provider
     )
     if not canonical_result["success"]:
         return canonical_result
@@ -2933,8 +3103,23 @@ def prepare_testdisk_execution(
             return traversal_result
 
     argv = _build_testdisk_root_command(
-        mechanism, identity["uid"], identity["gid"], working_image
+        setpriv_path,
+        testdisk_path,
+        identity["uid"],
+        identity["gid"],
+        working_image,
     )
+
+    try:
+        child_env = _build_testdisk_child_env(source_environ)
+    except ValueError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_ENV_INVALID",
+            f"TestDisk child environment could not be built: {error}",
+            status="refused",
+            display_args={"error": str(error)},
+        )
 
     return _testdisk_result(
         True,
@@ -2943,7 +3128,10 @@ def prepare_testdisk_execution(
         status="prepared",
         recovery_uid=identity["uid"],
         recovery_gid=identity["gid"],
+        setpriv_path=setpriv_path,
+        testdisk_path=testdisk_path,
         argv=argv,
+        env=child_env,
         cwd=str(evidence_dir),
         working_image_path=str(working_image),
         recovered_directory=str(recovered_testdisk),
@@ -2957,11 +3145,14 @@ def execute_testdisk_recovery(preparation, *, runner=subprocess.run):
     result, then summarize recovered/testdisk/.
 
     The runner (subprocess.run by default) is invoked exactly once with the
-    prepared argv and cwd set to the evidence directory. The interactive
-    terminal is preserved: no stdout/stderr/stdin capture, no shell. Only the
-    zero/non-zero exit distinction is interpreted; TestDisk's interactive
-    choices are never inspected. Returns the same recovery-result fields the
-    existing PhotoRec caller consumes.
+    prepared argv, the prepared minimal child environment, and cwd set to the
+    evidence directory. The argv and environment are taken verbatim from the
+    preparation result — execution performs NO PATH lookup and NEVER rebuilds
+    the environment from the live process. The interactive terminal is
+    preserved: no stdout/stderr/stdin capture, no shell. Only the zero/non-zero
+    exit distinction is interpreted; TestDisk's interactive choices are never
+    inspected. Returns the same recovery-result fields the existing PhotoRec
+    caller consumes.
     """
 
     result = {
@@ -2982,6 +3173,7 @@ def execute_testdisk_recovery(preparation, *, runner=subprocess.run):
         or not preparation.get("argv")
         or not preparation.get("cwd")
         or not preparation.get("recovered_directory")
+        or not isinstance(preparation.get("env"), dict)
     ):
         result["code"] = "TESTDISK_PREPARATION_INVALID"
         result["message"] = (
@@ -2991,10 +3183,11 @@ def execute_testdisk_recovery(preparation, *, runner=subprocess.run):
 
     argv = preparation["argv"]
     cwd = preparation["cwd"]
+    child_env = preparation["env"]
     recovered_testdisk = Path(preparation["recovered_directory"])
 
     try:
-        completed = runner(argv, cwd=cwd)
+        completed = runner(argv, cwd=cwd, env=child_env)
     except OSError as error:
         result["code"] = "TESTDISK_LAUNCH_FAILED"
         result["display_args"] = {"error": str(error)}
