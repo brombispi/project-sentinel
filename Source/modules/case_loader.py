@@ -458,6 +458,7 @@ def load_case(recovery_path, devices):
         recovery_path=str(case_path),
         case_name=manifest.get("case_name", ""),
     )
+    session.completed_at = manifest.get("completed_at")
 
     intake = _reconstruct_intake(manifest)
 

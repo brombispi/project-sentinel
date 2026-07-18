@@ -114,6 +114,9 @@ def write_case_manifest(session, device, assessment, intake=None):
         "intake": intake["intake"] if intake else {},
     }
 
+    if getattr(session, "completed_at", None):
+        manifest["completed_at"] = session.completed_at
+
     if session.destination_device:
         manifest["destination"] = {
             "path": session.destination_device.path,
