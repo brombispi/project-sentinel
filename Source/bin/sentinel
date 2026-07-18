@@ -34,6 +34,7 @@ from modules.echo import (
     set_log_failure_handler,
 )
 from modules.hermes import Hermes
+from modules.pdf_report_formatter import PdfReportError
 from modules.manifest import ManifestError, read_case_manifest, write_initial_case_manifest
 from modules.session_manager import (
     append_running_recovery_operation,
@@ -1180,25 +1181,56 @@ def _prompt_report_language():
         print(tr("validation.invalid_selection"))
 
 
-def _offer_report_generation(
-    session,
-    prompt_key,
-    saved_path_key,
-    save_report,
-    log_label,
-):
-    report_confirm = input(tr(prompt_key)).strip().lower()
+def _prompt_report_format():
+    """
+    Prompt the operator for the output format of a single report.
 
-    if not _confirmed_yes(report_confirm):
-        return
+    Defaults to Markdown (Enter accepts it), preserving the historical
+    behavior. Returns one of "markdown", "pdf", "both". The format choice is
+    independent of the language choice and of the other report's format, and it
+    never mutates the global UI language.
+    """
+    print()
+    print(tr("report.format.prompt.title"))
+    print(tr("report.format.option.markdown"))
+    print(tr("report.format.option.pdf"))
+    print(tr("report.format.option.both"))
 
-    language = _prompt_report_language()
+    while True:
+        choice = input(
+            tr("report.format.prompt.select", default="Markdown")
+        ).strip().lower()
 
+        if choice == "":
+            return "markdown"
+        if choice in ("1", "markdown", "md"):
+            return "markdown"
+        if choice in ("2", "pdf"):
+            return "pdf"
+        if choice in ("3", "both"):
+            return "both"
+
+        print(tr("validation.invalid_selection"))
+
+
+def _save_report_format(session, save_report, language, saved_path_key, log_label):
+    """
+    Save one report in one format and report the result independently.
+
+    A refusal to overwrite (FileExistsError) or a PDF-specific failure is
+    reported to the operator and never aborts the surrounding delivery workflow,
+    so a pre-existing file or a failure in one (report, language, format) never
+    removes or corrupts another artifact.
+    """
     try:
         report_path = save_report(language)
     except FileExistsError as error:
         print()
         print(error)
+        return
+    except PdfReportError as error:
+        print()
+        print(tr(error.message_key))
         return
 
     print()
@@ -1210,6 +1242,43 @@ def _offer_report_generation(
     )
 
 
+def _offer_report_generation(
+    session,
+    prompt_key,
+    save_markdown,
+    save_pdf,
+    markdown_saved_key,
+    pdf_saved_key,
+    markdown_log_label,
+    pdf_log_label,
+):
+    report_confirm = input(tr(prompt_key)).strip().lower()
+
+    if not _confirmed_yes(report_confirm):
+        return
+
+    language = _prompt_report_language()
+    report_format = _prompt_report_format()
+
+    if report_format in ("markdown", "both"):
+        _save_report_format(
+            session,
+            save_markdown,
+            language,
+            markdown_saved_key,
+            markdown_log_label,
+        )
+
+    if report_format in ("pdf", "both"):
+        _save_report_format(
+            session,
+            save_pdf,
+            language,
+            pdf_saved_key,
+            pdf_log_label,
+        )
+
+
 def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None):
     if recovery_result is None or not recovery_result["success"]:
         return
@@ -1217,17 +1286,23 @@ def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None)
     _offer_report_generation(
         session,
         "report.prompt.generate",
-        "report.label.saved_path",
         lambda language: Hermes(session, language).save_technician_report(),
+        lambda language: Hermes(session, language).save_technician_pdf(),
+        "report.label.saved_path",
+        "report.pdf.label.saved_path",
         "Technician report saved",
+        "Technician report PDF saved",
     )
 
     _offer_report_generation(
         session,
         "report.prompt.generate_customer",
-        "report.label.saved_path_customer",
         lambda language: Hermes(session, language).save_customer_report(),
+        lambda language: Hermes(session, language).save_customer_pdf(),
+        "report.label.saved_path_customer",
+        "report.pdf.label.saved_path_customer",
         "Customer report saved",
+        "Customer report PDF saved",
     )
 
 

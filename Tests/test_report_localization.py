@@ -487,6 +487,8 @@ class ReportLanguagePromptTests(unittest.TestCase):
 
 class IndependentReportLanguageSelectionTests(unittest.TestCase):
     def _load_delivery(self):
+        from modules.pdf_report_formatter import PdfReportError
+
         namespace = {
             "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
             "tr": lambda key, **kwargs: kwargs.get("path", key),
@@ -494,8 +496,13 @@ class IndependentReportLanguageSelectionTests(unittest.TestCase):
             "input": mock.Mock(),
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
+            "PdfReportError": PdfReportError,
             "_prompt_report_language": mock.Mock(),
+            # Format selection is independent of language; default to Markdown
+            # so this test isolates the independent-language behavior.
+            "_prompt_report_format": mock.Mock(return_value="markdown"),
         }
+        _load_sentinel_function("_save_report_format", namespace)
         _load_sentinel_function("_offer_report_generation", namespace)
         delivery = _load_sentinel_function("_run_delivery_workflow", namespace)
         return delivery, namespace

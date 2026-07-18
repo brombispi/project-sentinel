@@ -247,6 +247,21 @@
     "report.prompt.generate_customer": "Kundenbericht erstellen? [j/N]:",
     "report.label.saved_path_customer": "Kundenbericht gespeichert: {path}",
 
+    "report.format.prompt.title": "BERICHTSFORMAT WÄHLEN",
+    "report.format.option.markdown": "[1] Markdown",
+    "report.format.option.pdf": "[2] PDF",
+    "report.format.option.both": "[3] Beide",
+    "report.format.prompt.select": "Berichtsformat wählen [1-3, Eingabetaste für {default}]:",
+
+    "report.pdf.label.saved_path": "Technikerbericht als PDF gespeichert: {path}",
+    "report.pdf.label.saved_path_customer": "Kundenbericht als PDF gespeichert: {path}",
+    "report.pdf.error.dependency": "PDF-Export nicht verfügbar: Die Bibliothek ReportLab ist nicht installiert.",
+    "report.pdf.error.font": "PDF-Export fehlgeschlagen: Eine erforderliche Schriftart konnte nicht geladen werden.",
+    "report.pdf.error.rendering": "PDF-Export beim Erstellen des Dokuments fehlgeschlagen.",
+    "report.pdf.confidential.technician": "INTERN \u2014 VERTRAULICH",
+    "report.pdf.footer.generated": "Erstellt: {timestamp}",
+    "report.pdf.footer.page": "Seite {current} von {total}",
+
     "report.language.prompt.title": "BERICHTSSPRACHE WÄHLEN",
     "report.language.option.en": "[1] Englisch",
     "report.language.option.de": "[2] Deutsch",

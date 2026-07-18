@@ -247,6 +247,21 @@
     "report.prompt.generate_customer": "Generate Customer Report? [y/N]:",
     "report.label.saved_path_customer": "Customer report saved: {path}",
 
+    "report.format.prompt.title": "SELECT REPORT FORMAT",
+    "report.format.option.markdown": "[1] Markdown",
+    "report.format.option.pdf": "[2] PDF",
+    "report.format.option.both": "[3] Both",
+    "report.format.prompt.select": "Select report format [1-3, Enter for {default}]:",
+
+    "report.pdf.label.saved_path": "Technician report PDF saved: {path}",
+    "report.pdf.label.saved_path_customer": "Customer report PDF saved: {path}",
+    "report.pdf.error.dependency": "PDF export is unavailable: the ReportLab library is not installed.",
+    "report.pdf.error.font": "PDF export failed: a required font could not be loaded.",
+    "report.pdf.error.rendering": "PDF export failed while rendering the document.",
+    "report.pdf.confidential.technician": "INTERNAL \u2014 CONFIDENTIAL",
+    "report.pdf.footer.generated": "Generated: {timestamp}",
+    "report.pdf.footer.page": "Page {current} of {total}",
+
     "report.language.prompt.title": "SELECT REPORT LANGUAGE",
     "report.language.option.en": "[1] English",
     "report.language.option.de": "[2] Deutsch",

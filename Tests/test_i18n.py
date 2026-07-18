@@ -359,6 +359,8 @@ class DeliveryWorkflowTests(unittest.TestCase):
     CUSTOMER_PATH = Path("/tmp/recovery/reports/customer_report.md")
 
     def _load_delivery_function(self):
+        from modules.pdf_report_formatter import PdfReportError
+
         namespace = {
             "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
             "tr": lambda key, **kwargs: kwargs.get("path", key),
@@ -366,12 +368,16 @@ class DeliveryWorkflowTests(unittest.TestCase):
             "input": mock.Mock(),
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
-            # The per-report language prompt is exercised independently in
-            # test_report_localization.py; here it is mocked so these tests
-            # focus on the generate/decline offer flow and stay decoupled from
-            # language selection.
+            "PdfReportError": PdfReportError,
+            # The per-report language and format prompts are exercised
+            # independently in test_report_localization.py and
+            # test_pdf_report_export.py; here they are mocked (format defaults
+            # to Markdown) so these tests focus on the generate/decline offer
+            # flow and stay decoupled from language and format selection.
             "_prompt_report_language": mock.Mock(return_value="en"),
+            "_prompt_report_format": mock.Mock(return_value="markdown"),
         }
+        _load_sentinel_function("_save_report_format", namespace)
         _load_sentinel_function("_offer_report_generation", namespace)
         delivery = _load_sentinel_function(
             "_run_delivery_workflow",

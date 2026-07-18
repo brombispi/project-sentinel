@@ -35,6 +35,7 @@ from modules.archive import (
 from modules.argus import SmartEvidenceError, read_smart_evidence
 from modules.echo import AuditLogError, read_audit_log
 from modules.manifest import read_case_manifest
+from modules.pdf_report_formatter import PdfReportFormatter
 from modules.report_formatter import ReportFormatter
 from modules.summary import format_bytes
 
@@ -50,6 +51,16 @@ def technician_report_filename(language):
 def customer_report_filename(language):
     """Language-qualified customer report filename, e.g. customer_report.de.md."""
     return f"{CUSTOMER_REPORT_FILENAME_STEM}.{language}.md"
+
+
+def technician_report_pdf_filename(language):
+    """Language-qualified technician report PDF filename, e.g. technician_report.en.pdf."""
+    return f"{TECHNICIAN_REPORT_FILENAME_STEM}.{language}.pdf"
+
+
+def customer_report_pdf_filename(language):
+    """Language-qualified customer report PDF filename, e.g. customer_report.de.pdf."""
+    return f"{CUSTOMER_REPORT_FILENAME_STEM}.{language}.pdf"
 
 
 # Ordered translation keys for the technician report sections. Rendering derives
@@ -196,6 +207,11 @@ class Hermes:
 
     def _load_manifest(self):
         return read_case_manifest(Path(self.session.recovery_path))
+
+    def _case_name(self):
+        """Recorded case name (a case fact, never translated) for the PDF title
+        block. Returns None when the manifest records no case name."""
+        return _manifest_field(self._load_manifest(), "case_name")
 
     def _build_case_information(self, manifest, generated_at):
         return {
@@ -463,12 +479,18 @@ class Hermes:
 
         return {self._t("report.field.events"): events}
 
-    def build_technician_report(self):
+    def build_technician_report(self, *, generated_at=None):
         """
         Build the technician report for the current recovery session.
+
+        The generation timestamp defaults to the current time. It may be
+        supplied explicitly (e.g. so a PDF footer and the report field share one
+        timestamp, or to pin the value in tests); this does not change the
+        default behavior of existing callers.
         """
         manifest = self._load_manifest()
-        generated_at = datetime.now()
+        if generated_at is None:
+            generated_at = datetime.now()
         acquisition_state = self._load_acquisition_state()
         recovered_summary = self._load_recovered_summary()
         recovery_operations = manifest.get("recovery_operations") or []
@@ -533,6 +555,57 @@ class Hermes:
             )
 
         report_path.write_text(self.build_technician_markdown(), encoding="utf-8")
+        return report_path
+
+    def build_technician_pdf(self, *, generated_at=None, invariant=False) -> bytes:
+        """
+        Build a PDF representation of the technician report.
+
+        Renders the same structured, localized report that Markdown uses; it
+        does not parse Markdown and introduces no new report facts. A single
+        generation timestamp is shared by the report field and the PDF footer.
+        ``invariant`` (reproducible output) is off by default and enabled only
+        by determinism tests.
+        """
+        if generated_at is None:
+            generated_at = datetime.now()
+        report = self.build_technician_report(generated_at=generated_at)
+        return PdfReportFormatter().format_pdf(
+            title=self._t("report.title.technician"),
+            report=report,
+            section_order=tuple(report.keys()),
+            language=self.language,
+            report_kind="technician",
+            case_identifier=self.session.session_id,
+            case_name=self._case_name(),
+            generated_at=generated_at,
+            invariant=invariant,
+        )
+
+    def save_technician_pdf(self, *, generated_at=None, invariant=False) -> Path:
+        """
+        Write the technician report as a PDF into the case reports directory.
+
+        Mirrors save_technician_report: creates the reports directory, uses a
+        language- and format-qualified filename (technician_report.<lang>.pdf),
+        and raises FileExistsError when that file already exists, so overwrite
+        protection is independent per (report type, language, format). The PDF
+        is rendered fully in memory before writing, so a rendering failure never
+        writes a partial file and never affects the Markdown report.
+        """
+        reports_dir = Path(self.session.recovery_path) / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        report_path = reports_dir / technician_report_pdf_filename(self.language)
+        if report_path.exists():
+            raise FileExistsError(
+                f"Technician report PDF already exists: {report_path}"
+            )
+
+        pdf_bytes = self.build_technician_pdf(
+            generated_at=generated_at, invariant=invariant
+        )
+        report_path.write_bytes(pdf_bytes)
         return report_path
 
     def _customer_value(self, value):
@@ -662,7 +735,7 @@ class Hermes:
             self._t("report.field.policy_version"): CUSTOMER_POLICY_VERSION,
         }
 
-    def build_customer_report(self):
+    def build_customer_report(self, *, generated_at=None):
         """
         Build the customer report for the current recovery session.
 
@@ -670,9 +743,13 @@ class Hermes:
         Performed states authoritative imaging facts only; it never infers a
         recovery operation from recovered artifacts. Recovered-file figures are
         observational and read through the owning ARCHIVE summary API.
+
+        The generation timestamp defaults to the current time and may be
+        supplied explicitly; this does not change existing caller behavior.
         """
         manifest = self._load_manifest()
-        generated_at = datetime.now()
+        if generated_at is None:
+            generated_at = datetime.now()
         acquisition_state = self._load_acquisition_state()
         recovered_summary = self._load_recovered_summary()
 
@@ -731,6 +808,57 @@ class Hermes:
             )
 
         report_path.write_text(self.build_customer_markdown(), encoding="utf-8")
+        return report_path
+
+    def build_customer_pdf(self, *, generated_at=None, invariant=False) -> bytes:
+        """
+        Build a PDF representation of the customer report.
+
+        Renders the same structured, localized report that Markdown uses; it
+        does not parse Markdown and introduces no new report facts. ``invariant``
+        (reproducible output) is off by default and enabled only by determinism
+        tests.
+        """
+        if generated_at is None:
+            generated_at = datetime.now()
+        report = self.build_customer_report(generated_at=generated_at)
+        return PdfReportFormatter().format_pdf(
+            title=self._t("report.title.customer"),
+            report=report,
+            section_order=tuple(report.keys()),
+            language=self.language,
+            report_kind="customer",
+            case_identifier=self.session.session_id,
+            # The internal case name is deliberately omitted from the
+            # customer-facing PDF; only the Technician PDF shows it.
+            case_name=None,
+            generated_at=generated_at,
+            invariant=invariant,
+        )
+
+    def save_customer_pdf(self, *, generated_at=None, invariant=False) -> Path:
+        """
+        Write the customer report as a PDF into the case reports directory.
+
+        Mirrors save_customer_report with a language- and format-qualified
+        filename (customer_report.<lang>.pdf) and independent overwrite
+        protection per (report type, language, format). Rendered in memory
+        before writing, so a failure never writes a partial file and never
+        affects the Markdown report.
+        """
+        reports_dir = Path(self.session.recovery_path) / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        report_path = reports_dir / customer_report_pdf_filename(self.language)
+        if report_path.exists():
+            raise FileExistsError(
+                f"Customer report PDF already exists: {report_path}"
+            )
+
+        pdf_bytes = self.build_customer_pdf(
+            generated_at=generated_at, invariant=invariant
+        )
+        report_path.write_bytes(pdf_bytes)
         return report_path
 
     def build_partner_report(self):

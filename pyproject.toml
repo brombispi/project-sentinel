@@ -3,3 +3,8 @@ name = "project-sentinel"
 version = "0.1.0"
 description = "Operational data recovery workflow platform for DigiRettung."
 requires-python = ">=3.12"
+dependencies = [
+    # HERMES PDF report export (first third-party runtime dependency).
+    # Pure-Python core, no system libraries; pinned to the 4.x line.
+    "reportlab>=4.0,<5",
+]
