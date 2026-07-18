@@ -25,3 +25,29 @@ class RecoveryOutcome(str, Enum):
     SUCCESSFUL = "SUCCESSFUL"
     PARTIAL = "PARTIAL"
     UNSUCCESSFUL = "UNSUCCESSFUL"
+
+
+class RecoveryOperationType(str, Enum):
+    """
+    Supported recovery-operation types recorded in the append-only
+    recovery_operations history (see RecoveryOperationRecord.md).
+
+    Milestone M2 supports PhotoRec only. No other tool is reserved.
+    """
+
+    PHOTOREC = "PHOTOREC"
+
+
+class RecoveryOperationState(str, Enum):
+    """
+    Execution-completion state of a single recovery operation attempt.
+
+    Describes execution completion, never recovery effectiveness. Zero
+    recovered items never determines COMPLETED or FAILED; the operator's
+    case-level judgement lives separately in RecoveryOutcome.
+    """
+
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    INTERRUPTED = "INTERRUPTED"

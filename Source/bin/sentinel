@@ -35,7 +35,13 @@ from modules.echo import (
 )
 from modules.hermes import Hermes
 from modules.manifest import ManifestError, read_case_manifest, write_initial_case_manifest
-from modules.session_manager import save_case, update_status
+from modules.session_manager import (
+    append_running_recovery_operation,
+    complete_recovery_operation,
+    resolve_interrupted_recovery_operation,
+    save_case,
+    update_status,
+)
 from modules.intake import collect_case_intake
 from modules.janus import evaluate_destination
 from modules.device_selection import (
@@ -73,7 +79,7 @@ from i18n import (
 )
 from core.codex import Codex
 from core.session import RecoverySession
-from core.status import RecoveryOutcome, RecoveryStatus
+from core.status import RecoveryOperationType, RecoveryOutcome, RecoveryStatus
 
 init_language(PROJECT_ROOT)
 
@@ -448,6 +454,10 @@ def _run_recovery_method_selection(session, assessment, intake):
         recovery_confirm = input(tr("photorec.prompt.proceed")).strip().lower()
 
         if _confirmed_yes(recovery_confirm):
+            append_running_recovery_operation(
+                session,
+                RecoveryOperationType.PHOTOREC.value,
+            )
             update_status(
                 session,
                 RecoveryStatus.RECOVERING,
@@ -458,6 +468,10 @@ def _run_recovery_method_selection(session, assessment, intake):
 
             recovery_result = execute_photorec_recovery(session)
 
+            complete_recovery_operation(
+                session,
+                success=recovery_result["success"],
+            )
             update_status(
                 session,
                 RecoveryStatus.READY_FOR_RECOVERY,
@@ -1663,6 +1677,12 @@ def route_case(
                 session,
                 "SENTINEL",
                 "Interrupted recovery session; offering recovery operations.",
+            )
+            resolve_interrupted_recovery_operation(
+                session,
+                session.source_device,
+                assessment,
+                intake=intake,
             )
 
         strategy = create_strategy(assessment)

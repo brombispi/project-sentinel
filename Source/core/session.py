@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -19,6 +19,8 @@ class RecoverySession:
 
     completed_at: str | None = None
     recovery_outcome: str | None = None
+
+    recovery_operations: list = field(default_factory=list)
 
     source_device: object | None = None
     destination_device: object | None = None

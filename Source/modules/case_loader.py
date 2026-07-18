@@ -460,6 +460,7 @@ def load_case(recovery_path, devices):
     )
     session.completed_at = manifest.get("completed_at")
     session.recovery_outcome = manifest.get("recovery_outcome")
+    session.recovery_operations = list(manifest.get("recovery_operations") or [])
 
     intake = _reconstruct_intake(manifest)
 
