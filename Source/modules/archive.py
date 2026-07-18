@@ -28,6 +28,7 @@ def create_recovery_folder(session_id: str) -> str:
     recovery_path.mkdir(parents=True, exist_ok=True)
     
     (recovery_path / "images").mkdir(exist_ok=True)
+    (recovery_path / "working").mkdir(exist_ok=True)
     (recovery_path / "recovered").mkdir(exist_ok=True)
     (recovery_path / "exports").mkdir(exist_ok=True)
     (recovery_path / "notes").mkdir(exist_ok=True)
@@ -1255,6 +1256,63 @@ def _count_recovered_artifacts(recovered_dir):
     )
 
 
+# Disjoint recovered-artifact roots. Each recovery tool owns a non-overlapping
+# subtree of recovered/ so per-tool counts sum without double-counting
+# (TestDiskIntegration.md §8, Decision A): PhotoRec -> recovered/recup.*,
+# TestDisk -> recovered/testdisk/. The summary counts each root independently
+# and never scans the shared recovered/ parent as a single tree.
+TESTDISK_RECOVERED_DIRNAME = "testdisk"
+
+
+def _count_files_in_tree(root_dir):
+    """
+    Count files and total bytes under a single recovered root directory.
+    """
+
+    import os
+
+    file_count = 0
+    total_bytes = 0
+
+    for dirpath, _dirnames, filenames in os.walk(
+        root_dir,
+        onerror=lambda _error: None,
+    ):
+        for filename in filenames:
+            file_path = Path(dirpath) / filename
+            try:
+                if not file_path.is_file():
+                    continue
+                file_count += 1
+                total_bytes += file_path.stat().st_size
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+
+    return file_count, total_bytes
+
+
+def _count_testdisk_artifacts(recovered_dir):
+    """
+    Count observable recovery artifacts under recovered/testdisk/.
+
+    TestDisk owns exactly the single recovered/testdisk/ root, disjoint from
+    PhotoRec's recovered/recup.* roots. Returns the root directory count (0 or
+    1), file count, total bytes, and the root path when present.
+    """
+
+    testdisk_dir = Path(recovered_dir) / TESTDISK_RECOVERED_DIRNAME
+
+    try:
+        if not testdisk_dir.is_dir():
+            return (0, 0, 0, [])
+    except (FileNotFoundError, PermissionError, OSError):
+        return (0, 0, 0, [])
+
+    file_count, total_bytes = _count_files_in_tree(testdisk_dir)
+
+    return (1, file_count, total_bytes, [str(testdisk_dir)])
+
+
 def _empty_recovered_summary():
     return {
         "recovered_file_count": 0,
@@ -1267,9 +1325,13 @@ def _empty_recovered_summary():
 
 def summarize_recovered_artifacts(recovery_path):
     """
-    Summarize observable recovery artifacts under recovered/recup.*.
+    Summarize observable recovery artifacts under the disjoint recovered roots
+    recovered/recup.* (PhotoRec) and recovered/testdisk/ (TestDisk).
 
-    Read-only. Does not modify recovery outputs.
+    Each root is counted independently and summed, so a recup.* file is never
+    double-counted and one tool never inflates the other's totals
+    (TestDiskIntegration.md §8, Decision A). Read-only; does not modify
+    recovery outputs.
     """
 
     recovery_path = Path(recovery_path)
@@ -1279,18 +1341,28 @@ def summarize_recovered_artifacts(recovery_path):
         return _empty_recovered_summary()
 
     (
-        recovered_directory_count,
-        recovered_file_count,
-        recovered_size_bytes,
+        photorec_directory_count,
+        photorec_file_count,
+        photorec_size_bytes,
         recup_dirs,
     ) = _count_recovered_artifacts(recovered_dir)
 
+    (
+        testdisk_directory_count,
+        testdisk_file_count,
+        testdisk_size_bytes,
+        testdisk_dirs,
+    ) = _count_testdisk_artifacts(recovered_dir)
+
+    recovered_directory_count = photorec_directory_count + testdisk_directory_count
+    recovered_file_count = photorec_file_count + testdisk_file_count
+    recovered_size_bytes = photorec_size_bytes + testdisk_size_bytes
+
     recup_directories = []
 
-    for recup_dir in recup_dirs:
-        recup_path = Path(recup_dir)
+    for root_dir in recup_dirs + testdisk_dirs:
         recup_directories.append(
-            recup_path.relative_to(recovery_path).as_posix()
+            Path(root_dir).relative_to(recovery_path).as_posix()
         )
 
     return {

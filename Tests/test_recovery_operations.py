@@ -72,10 +72,10 @@ def _write_manifest(recovery_path, manifest):
 
 
 class RecoveryOperationEnumTests(unittest.TestCase):
-    def test_type_defines_only_photorec(self):
+    def test_type_defines_photorec_and_testdisk(self):
         self.assertEqual(
             [member.value for member in RecoveryOperationType],
-            ["PHOTOREC"],
+            ["PHOTOREC", "TESTDISK"],
         )
 
     def test_states_are_exactly_the_four_allowed(self):
@@ -87,6 +87,13 @@ class RecoveryOperationEnumTests(unittest.TestCase):
     def test_enum_members_are_strings(self):
         self.assertIsInstance(RecoveryOperationState.RUNNING, str)
         self.assertEqual(RecoveryOperationType.PHOTOREC.value, "PHOTOREC")
+
+    def test_testdisk_type_serialization_round_trips(self):
+        # The stored value is the plain string persisted in case.json, and it
+        # rehydrates back to the same member.
+        self.assertIsInstance(RecoveryOperationType.TESTDISK, str)
+        self.assertEqual(RecoveryOperationType.TESTDISK.value, "TESTDISK")
+        self.assertEqual(RecoveryOperationType("TESTDISK"), RecoveryOperationType.TESTDISK)
 
 
 class SessionModelTests(unittest.TestCase):
@@ -727,8 +734,17 @@ class InvariantEnforcementTests(unittest.TestCase):
         session = _session("/tmp/case")
         with self.assertRaises(ValueError):
             session_manager.append_running_recovery_operation(
-                session, "TESTDISK"
+                session, "DDRESCUE"
             )
+
+    def test_testdisk_operation_type_is_accepted(self):
+        session = _session("/tmp/case")
+        session_manager.append_running_recovery_operation(
+            session, RecoveryOperationType.TESTDISK.value
+        )
+        entry = session.recovery_operations[-1]
+        self.assertEqual(entry["type"], "TESTDISK")
+        self.assertEqual(entry["state"], "RUNNING")
 
 
 if __name__ == "__main__":

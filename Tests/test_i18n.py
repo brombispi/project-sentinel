@@ -199,6 +199,22 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn("READY_FOR_IMAGING", rendered)
         self.assertNotIn("BEREIT", rendered)
 
+    def test_testdisk_option_has_no_menu_number_prefix_yet(self):
+        # The TestDisk operation identity string is intentionally staged WITHOUT
+        # a "[n]" menu-number prefix, unlike recovery.option.photorec
+        # ("[1] PhotoRec"). The recovery menu is not wired in this foundational
+        # slice; the number prefix and menu ordering will be reconciled during
+        # UI wiring (TestDiskIntegration.md §8.3). This test locks the
+        # intentional, temporary asymmetry so it stays a conscious choice rather
+        # than an accidental omission.
+        set_language("en", persist=False)
+        self.assertEqual(tr("recovery.option.testdisk"), "TestDisk")
+        self.assertFalse(tr("recovery.option.testdisk").startswith("["))
+
+        set_language("de", persist=False)
+        self.assertEqual(tr("recovery.option.testdisk"), "TestDisk")
+        self.assertFalse(tr("recovery.option.testdisk").startswith("["))
+
     def test_report_keys_present_and_parity(self):
         en = json.loads((I18N_DIR / "en.json").read_text(encoding="utf-8"))
         de = json.loads((I18N_DIR / "de.json").read_text(encoding="utf-8"))

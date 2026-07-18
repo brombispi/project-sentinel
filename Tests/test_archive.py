@@ -7,11 +7,15 @@ from pathlib import Path
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
 sys.path.insert(0, str(SOURCE_ROOT))
 
+import os
+import shutil
+
 from modules.archive import (
     ACQUISITION_SOURCE_FILENAME,
     AcquisitionSourceError,
     FingerprintEvidenceError,
     SHA256_FILENAME,
+    create_recovery_folder,
     read_acquisition_source,
     read_fingerprint_evidence,
     summarize_recovered_artifacts,
@@ -154,6 +158,35 @@ def _write_recovered_artifacts(case_dir):
     (recup_dir / "nested" / "file_b.bin").write_bytes(b"12345")
 
 
+def _write_testdisk_artifacts(case_dir):
+    testdisk_dir = case_dir / "recovered" / "testdisk"
+    testdisk_dir.mkdir(parents=True, exist_ok=True)
+    (testdisk_dir / "recovered_1.dat").write_bytes(b"wxyz")
+    nested = testdisk_dir / "partition_1"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "recovered_2.dat").write_bytes(b"mn")
+
+
+class CreateRecoveryFolderTests(unittest.TestCase):
+    def test_create_recovery_folder_creates_working_directory(self):
+        session_id = "REC-TEST-CREATE-WORKING"
+        recovery_path = Path(create_recovery_folder(session_id))
+        try:
+            self.assertTrue((recovery_path / "working").is_dir())
+            # The pre-existing structural directories are preserved.
+            for name in (
+                "images",
+                "recovered",
+                "exports",
+                "notes",
+                "reports",
+                "evidence",
+            ):
+                self.assertTrue((recovery_path / name).is_dir())
+        finally:
+            shutil.rmtree(recovery_path, ignore_errors=True)
+
+
 class SummarizeRecoveredArtifactsTests(unittest.TestCase):
     def test_summarize_recovered_artifacts_returns_populated_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -184,6 +217,196 @@ class SummarizeRecoveredArtifactsTests(unittest.TestCase):
             result = summarize_recovered_artifacts(case_dir)
 
             self.assertEqual(result, EMPTY_RECOVERED_SUMMARY)
+
+
+class SummarizeRecoveredArtifactsDisjointRootTests(unittest.TestCase):
+    """
+    recovered/recup.* (PhotoRec) and recovered/testdisk/ (TestDisk) are disjoint
+    recovery roots. Each is counted independently and summed, with no recup.*
+    artifact ever double-counted (TestDiskIntegration.md §8, Decision A).
+    """
+
+    # PhotoRec-only counting is covered by
+    # SummarizeRecoveredArtifactsTests.test_summarize_recovered_artifacts_returns_populated_summary;
+    # it is intentionally not duplicated here.
+
+    def test_testdisk_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            _write_testdisk_artifacts(case_dir)
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result["recovered_directory_count"], 1)
+            self.assertEqual(result["recovered_file_count"], 2)
+            self.assertEqual(result["recovered_size_bytes"], 6)
+            self.assertEqual(result["recup_directories"], ["recovered/testdisk"])
+            self.assertTrue(result["recovery_present"])
+
+    def test_photorec_and_testdisk_together_sum_without_overlap(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            _write_recovered_artifacts(case_dir)
+            _write_testdisk_artifacts(case_dir)
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            # Roots are disjoint: totals are the exact sum of each root.
+            self.assertEqual(result["recovered_directory_count"], 2)
+            self.assertEqual(result["recovered_file_count"], 4)
+            self.assertEqual(result["recovered_size_bytes"], 14)
+            self.assertEqual(
+                result["recup_directories"],
+                ["recovered/recup.1", "recovered/testdisk"],
+            )
+            self.assertTrue(result["recovery_present"])
+
+    def test_empty_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            (case_dir / "recovered").mkdir()
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result, EMPTY_RECOVERED_SUMMARY)
+
+    def test_recup_prefixed_name_inside_testdisk_is_not_double_counted(self):
+        # A directory named like a PhotoRec batch (recup.*) living *inside* the
+        # TestDisk root must be counted once, as part of the single testdisk
+        # root, and never promoted to a second recup.* root. This fails for any
+        # naive implementation that scans all of recovered/ for recup.*.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            _write_recovered_artifacts(case_dir)
+            _write_testdisk_artifacts(case_dir)
+            decoy = case_dir / "recovered" / "testdisk" / "recup.9"
+            decoy.mkdir(parents=True, exist_ok=True)
+            (decoy / "decoy.dat").write_bytes(b"z")
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            # recup.* roots at the top level: only recovered/recup.1.
+            # testdisk root: 1. Total directory roots = 2 (the decoy is not a
+            # root, only a file inside the testdisk tree).
+            self.assertEqual(result["recovered_directory_count"], 2)
+            # PhotoRec 2 files + TestDisk 2 files + 1 decoy file inside testdisk.
+            self.assertEqual(result["recovered_file_count"], 5)
+            self.assertEqual(result["recovered_size_bytes"], 15)
+            self.assertEqual(
+                result["recup_directories"],
+                ["recovered/recup.1", "recovered/testdisk"],
+            )
+
+    def test_testdisk_path_as_plain_file_is_treated_as_absent(self):
+        # recovered/testdisk existing as a regular file (not a directory) must
+        # be ignored, exactly as an absent testdisk root: no counts, no
+        # location, no recovery_present.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            (case_dir / "recovered").mkdir()
+            (case_dir / "recovered" / "testdisk").write_bytes(b"not a dir")
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result, EMPTY_RECOVERED_SUMMARY)
+
+    def test_testdisk_empty_nested_directory_adds_no_files_and_one_root(self):
+        # A nested subdirectory (empty here) inside the single testdisk root
+        # contributes zero files and does NOT inflate recovered_directory_count:
+        # the count is of recovery roots, not of every directory in the tree.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            (case_dir / "recovered" / "testdisk" / "empty_sub").mkdir(parents=True)
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            self.assertEqual(result["recovered_file_count"], 0)
+            self.assertEqual(result["recovered_size_bytes"], 0)
+            # Root count is 1 (the testdisk root only), unaffected by the nested
+            # empty subdirectory.
+            self.assertEqual(result["recovered_directory_count"], 1)
+            self.assertEqual(result["recup_directories"], ["recovered/testdisk"])
+            # Current semantics: a present root marks recovery_present, even with
+            # zero files (parallels an empty recup.* directory). Locked as-is.
+            self.assertTrue(result["recovery_present"])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks not supported")
+    def test_testdisk_directory_symlink_is_not_traversed(self):
+        # os.walk runs with followlinks=False, so a symlinked *directory* inside
+        # the testdisk root is not descended into; its contents are never
+        # counted. This guards against symlink cycles and counting data outside
+        # the root.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            testdisk_dir = case_dir / "recovered" / "testdisk"
+            testdisk_dir.mkdir(parents=True)
+            (testdisk_dir / "keep.dat").write_bytes(b"abc")
+
+            external_dir = case_dir / "external"
+            external_dir.mkdir()
+            (external_dir / "outside_a.bin").write_bytes(b"1234")
+            (external_dir / "outside_b.bin").write_bytes(b"56789")
+
+            try:
+                os.symlink(external_dir, testdisk_dir / "link_dir")
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation not permitted")
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            # Only the real file counts; the symlinked directory is not traversed.
+            self.assertEqual(result["recovered_file_count"], 1)
+            self.assertEqual(result["recovered_size_bytes"], 3)
+            self.assertEqual(result["recovered_directory_count"], 1)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks not supported")
+    def test_testdisk_file_symlink_is_counted_and_sized_by_target(self):
+        # LOCKED CURRENT BEHAVIOR: a symlink to a regular file is counted as a
+        # file and sized by its target (Path.is_file()/stat() follow the link).
+        # This matches the existing PhotoRec counting path and is intentionally
+        # preserved; changing it would alter counting semantics for both roots.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            testdisk_dir = case_dir / "recovered" / "testdisk"
+            testdisk_dir.mkdir(parents=True)
+            (testdisk_dir / "keep.dat").write_bytes(b"abc")
+
+            target_file = case_dir / "external_target.bin"
+            target_file.write_bytes(b"wxyz")
+
+            try:
+                os.symlink(target_file, testdisk_dir / "link.dat")
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation not permitted")
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            # keep.dat (3) + link.dat resolving to the 4-byte target = 2 files,
+            # 7 bytes.
+            self.assertEqual(result["recovered_file_count"], 2)
+            self.assertEqual(result["recovered_size_bytes"], 7)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "mkfifo not supported")
+    def test_testdisk_fifo_special_file_is_skipped(self):
+        # A FIFO (named pipe) is not a regular file, so Path.is_file() is False
+        # and it is skipped: neither counted nor sized.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir)
+            testdisk_dir = case_dir / "recovered" / "testdisk"
+            testdisk_dir.mkdir(parents=True)
+            (testdisk_dir / "keep.dat").write_bytes(b"abc")
+
+            try:
+                os.mkfifo(testdisk_dir / "pipe")
+            except (OSError, NotImplementedError):
+                self.skipTest("mkfifo not permitted")
+
+            result = summarize_recovered_artifacts(case_dir)
+
+            # Only the regular file is counted; the FIFO is skipped.
+            self.assertEqual(result["recovered_file_count"], 1)
+            self.assertEqual(result["recovered_size_bytes"], 3)
+            self.assertEqual(result["recovered_directory_count"], 1)
 
 
 if __name__ == "__main__":

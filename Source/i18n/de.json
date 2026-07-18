@@ -193,6 +193,8 @@
     "recovery.option.desc": "    Signaturbasierte Wiederherstellung",
     "recovery.option.cancel": "[2] Abbrechen",
     "recovery.note.testdisk": "Hinweis: TestDisk ist noch nicht integriert.",
+    "recovery.option.testdisk": "TestDisk",
+    "recovery.option.testdisk_desc": "    Dateisystem-Wiederherstellung",
     "recovery.prompt.select": "Vorgang wählen [1-2]:",
 
     "photorec.guidance.title": "PHOTOREC GUIDANCE",
@@ -210,6 +212,7 @@
 
     "recovery.result.title": "WIEDERHERSTELLUNGSERGEBNIS",
     "recovery.result.photorec_session": "PhotoRec-Sitzung      :",
+    "recovery.result.testdisk_session": "TestDisk-Sitzung      :",
     "recovery.result.recovered_directories": "Wiederhergestellte Verzeichnisse :",
     "recovery.result.recovered_files": "Wiederhergestellte Dateien       :",
     "recovery.result.recovered_size": "Wiederhergestellte Grösse        :",
@@ -239,6 +242,7 @@
     "summary.value.not_available": "Nicht verfügbar",
     "summary.value.cancelled": "Vom Bediener abgebrochen",
     "summary.value.photorec": "PhotoRec",
+    "summary.value.testdisk": "TestDisk",
     "summary.value.ended_normally": "Normal beendet",
     "summary.complete": "Bewertung abgeschlossen",
 

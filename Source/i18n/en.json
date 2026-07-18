@@ -193,6 +193,8 @@
     "recovery.option.desc": "    Signature carving",
     "recovery.option.cancel": "[2] Cancel",
     "recovery.note.testdisk": "Note: TestDisk is not yet integrated.",
+    "recovery.option.testdisk": "TestDisk",
+    "recovery.option.testdisk_desc": "    Filesystem recovery",
     "recovery.prompt.select": "Select operation [1-2]:",
 
     "photorec.guidance.title": "PHOTOREC GUIDANCE",
@@ -210,6 +212,7 @@
 
     "recovery.result.title": "RECOVERY RESULT",
     "recovery.result.photorec_session": "PhotoRec session      :",
+    "recovery.result.testdisk_session": "TestDisk session      :",
     "recovery.result.recovered_directories": "Recovered directories :",
     "recovery.result.recovered_files": "Recovered files       :",
     "recovery.result.recovered_size": "Recovered size        :",
@@ -239,6 +242,7 @@
     "summary.value.not_available": "Not available",
     "summary.value.cancelled": "Cancelled by operator",
     "summary.value.photorec": "PhotoRec",
+    "summary.value.testdisk": "TestDisk",
     "summary.value.ended_normally": "Ended normally",
     "summary.complete": "Assessment Complete",
 

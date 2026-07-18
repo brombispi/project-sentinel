@@ -32,10 +32,14 @@ class RecoveryOperationType(str, Enum):
     Supported recovery-operation types recorded in the append-only
     recovery_operations history (see RecoveryOperationRecord.md).
 
-    Milestone M2 supports PhotoRec only. No other tool is reserved.
+    PhotoRec is the signature-carving operation. TestDisk is the
+    filesystem-aware operation that runs against a disposable working copy
+    (see TestDiskIntegration.md). A member is added only when the operation
+    is actually implemented (RecoveryOperationRecord.md §3.2).
     """
 
     PHOTOREC = "PHOTOREC"
+    TESTDISK = "TESTDISK"
 
 
 class RecoveryOperationState(str, Enum):
