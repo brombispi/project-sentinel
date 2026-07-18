@@ -19,7 +19,7 @@ from i18n.translator import (  # noqa: E402
 VALID_BLOCK = {
     "recovery_account": "recovery-user",
     "forbidden_groups": ["group-a", "group-b"],
-    "privilege_drop_mechanism": "drop-tool",
+    "privilege_drop_mechanism": "setpriv",
     "execution_mode": "sudo",
     "working_copy_safety_margin_bytes": 12345,
 }
@@ -57,7 +57,7 @@ class ValidConfigTests(TestDiskConfigTestBase):
             {
                 "recovery_account": "recovery-user",
                 "forbidden_groups": ["group-a", "group-b"],
-                "privilege_drop_mechanism": "drop-tool",
+                "privilege_drop_mechanism": "setpriv",
                 "execution_mode": "sudo",
                 "working_copy_safety_margin_bytes": 12345,
             },
@@ -87,7 +87,7 @@ class ValidConfigTests(TestDiskConfigTestBase):
             VALID_BLOCK,
             recovery_account="  recovery-user  ",
             forbidden_groups=[" group-a ", "group-b"],
-            privilege_drop_mechanism="  drop-tool ",
+            privilege_drop_mechanism="  setpriv ",
             execution_mode="EXTERNAL",
         )
         self._write_testdisk(block)
@@ -98,9 +98,52 @@ class ValidConfigTests(TestDiskConfigTestBase):
             result["config"]["forbidden_groups"], ["group-a", "group-b"]
         )
         self.assertEqual(
-            result["config"]["privilege_drop_mechanism"], "drop-tool"
+            result["config"]["privilege_drop_mechanism"], "setpriv"
         )
         self.assertEqual(result["config"]["execution_mode"], "external")
+
+
+class DropMechanismConstraintTests(TestDiskConfigTestBase):
+    """privilege_drop_mechanism is constrained to the supported set (setpriv)."""
+
+    def test_setpriv_mechanism_is_accepted(self):
+        block = dict(VALID_BLOCK, privilege_drop_mechanism="setpriv")
+        self._write_testdisk(block)
+        result = read_testdisk_config(self.project_root)
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            result["config"]["privilege_drop_mechanism"], "setpriv"
+        )
+
+    def test_unknown_mechanism_is_rejected(self):
+        block = dict(VALID_BLOCK, privilege_drop_mechanism="rm -rf /")
+        self._write_testdisk(block)
+        result = read_testdisk_config(self.project_root)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CONFIG_INVALID_MECHANISM")
+        self.assertEqual(result["field"], "privilege_drop_mechanism")
+
+    def test_arbitrary_command_template_is_rejected(self):
+        block = dict(
+            VALID_BLOCK,
+            privilege_drop_mechanism="sudo setpriv --reuid={uid}",
+        )
+        self._write_testdisk(block)
+        result = read_testdisk_config(self.project_root)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CONFIG_INVALID_MECHANISM")
+
+    def test_no_mechanism_default_is_introduced(self):
+        # Omitting the mechanism must stay a fail-closed MISSING_FIELD; a
+        # default (e.g. setpriv) must NOT be silently supplied.
+        block = dict(VALID_BLOCK)
+        del block["privilege_drop_mechanism"]
+        self._write_testdisk(block)
+        result = read_testdisk_config(self.project_root)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CONFIG_MISSING_FIELD")
+        self.assertEqual(result["field"], "privilege_drop_mechanism")
+        self.assertNotIn("config", result)
 
 
 class AbsentConfigTests(TestDiskConfigTestBase):

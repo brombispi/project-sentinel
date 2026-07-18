@@ -1,3 +1,4 @@
+import stat
 import sys
 import unittest
 from pathlib import Path
@@ -10,10 +11,14 @@ sys.path.insert(0, str(SOURCE_ROOT))
 # These are ARCHIVE-internal helpers (underscore-prefixed): not a public API.
 # Tests import the private names explicitly, which is permitted.
 from modules.archive import (  # noqa: E402
+    _TESTDISK_LOG_MODE,
+    _TESTDISK_RECOVERED_DIR_MODE,
     _TESTDISK_WORKING_COPY_FILENAME,
     _TESTDISK_WORKING_COPY_MODE,
     _check_working_free_space,
     _default_identity_resolver,
+    _prepare_protected_target,
+    _prepare_testdisk_output_targets,
     _prepare_testdisk_working_copy,
     _reject_unsafe_recovery_identity,
     _resolve_recovery_identity,
@@ -106,6 +111,8 @@ class FakeFsOps:
         self.files[destination] = self.files.pop(source)
         if source in self.modes:
             self.modes[destination] = self.modes.pop(source)
+        if source in self.owners:
+            self.owners[destination] = self.owners.pop(source)
 
     def chown(self, path, uid, gid):
         self.calls.append(("chown", path, uid, gid))
@@ -606,14 +613,22 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         for step in ("create_secure_file", "copy", "fsync_file", "rename",
                      "fsync_dir", "chown", "chmod"):
             self.assertIn(step, names)
-        # Restricted create happens BEFORE any copy; file fsync before rename;
-        # directory fsync after rename; ownership last.
+        # Corrected ordering (§3): restricted create BEFORE any copy; copy
+        # BEFORE file fsync; file fsync BEFORE ownership; ownership (chown then
+        # chmod) applied to the .tmp BEFORE the atomic rename; directory fsync
+        # AFTER the rename. This guarantees the final file is never owned by the
+        # privileged preparer, even briefly.
         self.assertLess(names.index("create_secure_file"), names.index("copy"))
         self.assertLess(names.index("copy"), names.index("fsync_file"))
-        self.assertLess(names.index("fsync_file"), names.index("rename"))
-        self.assertLess(names.index("rename"), names.index("fsync_dir"))
-        self.assertLess(names.index("fsync_dir"), names.index("chown"))
+        self.assertLess(names.index("fsync_file"), names.index("chown"))
         self.assertLess(names.index("chown"), names.index("chmod"))
+        self.assertLess(names.index("chmod"), names.index("rename"))
+        self.assertLess(names.index("rename"), names.index("fsync_dir"))
+        # chown/chmod act on the .tmp path (pre-rename), not the final path.
+        chown_call = next(c for c in fs.calls if c[0] == "chown")
+        chmod_call = next(c for c in fs.calls if c[0] == "chmod")
+        self.assertEqual(chown_call[1], self.TMP)
+        self.assertEqual(chmod_call[1], self.TMP)
         self.assertIn(self.FINAL, fs.files)
         self.assertNotIn(self.TMP, fs.files)
         self.assertEqual(fs.owners[self.FINAL], (999, 991))
@@ -737,7 +752,10 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertNotIn(self.FINAL, fs.files)
         self.assertNotIn(self.TMP, fs.files)
 
-    def test_ownership_failure_after_rename_removes_final(self):
+    def test_ownership_failure_before_rename_cleans_tmp_and_no_final(self):
+        # Ownership is now applied to the .tmp BEFORE the rename, so a chown
+        # failure is a pre-rename failure: the tmp is cleaned up and no final
+        # file is ever created.
         fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
                        fail_on={"chown"})
         result = _prepare_testdisk_working_copy(
@@ -748,6 +766,21 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED")
         self.assertNotIn(self.FINAL, fs.files)
         self.assertNotIn(self.TMP, fs.files)
+        # The rename must never have happened.
+        self.assertNotIn("rename", fs.call_names())
+
+    def test_chmod_failure_before_rename_cleans_tmp_and_no_final(self):
+        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
+                       fail_on={"chmod"})
+        result = _prepare_testdisk_working_copy(
+            self.SOURCE, self.WORKING,
+            owner_uid=999, owner_gid=991, fs_ops=fs,
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED")
+        self.assertNotIn(self.FINAL, fs.files)
+        self.assertNotIn(self.TMP, fs.files)
+        self.assertNotIn("rename", fs.call_names())
 
 
 class ExecutionTargetGuardTests(unittest.TestCase):
@@ -793,6 +826,223 @@ class ExecutionTargetGuardTests(unittest.TestCase):
         )
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_TARGET_IS_CANONICAL")
+
+
+class FakeOutputFsOps:
+    """
+    In-memory model of directory/file/symlink objects for output/log
+    preparation tests. lstat reports type bits so symlinks and type mismatches
+    are observable; mkdir/create_regular_file fail if the path already exists
+    (modelling O_EXCL / mkdir semantics). Optional per-op failure injection.
+    """
+
+    def __init__(self, *, fail_on=None):
+        self.objects = {}
+        self.calls = []
+        self.fail_on = set(fail_on or [])
+
+    def seed(self, path, *, kind, uid, gid, mode, is_symlink=False):
+        self.objects[str(path)] = {
+            "kind": kind,
+            "uid": uid,
+            "gid": gid,
+            "mode": mode,
+            "is_symlink": is_symlink,
+        }
+
+    def _maybe_fail(self, op):
+        if op in self.fail_on:
+            raise OSError(f"simulated {op} failure")
+
+    def _mode_with_type(self, entry):
+        if entry["is_symlink"]:
+            return stat.S_IFLNK | entry["mode"]
+        if entry["kind"] == "dir":
+            return stat.S_IFDIR | entry["mode"]
+        return stat.S_IFREG | entry["mode"]
+
+    def lstat(self, path):
+        self.calls.append(("lstat", path))
+        self._maybe_fail("lstat")
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        entry = self.objects[path]
+        return SimpleNamespace(
+            st_mode=self._mode_with_type(entry),
+            st_uid=entry["uid"],
+            st_gid=entry["gid"],
+        )
+
+    def mkdir(self, path, mode):
+        self.calls.append(("mkdir", path, mode))
+        self._maybe_fail("mkdir")
+        if path in self.objects:
+            raise FileExistsError(path)
+        self.objects[path] = {
+            "kind": "dir", "uid": 0, "gid": 0, "mode": mode,
+            "is_symlink": False,
+        }
+
+    def create_regular_file(self, path, mode):
+        self.calls.append(("create_regular_file", path, mode))
+        self._maybe_fail("create_regular_file")
+        if path in self.objects:
+            raise FileExistsError(path)
+        self.objects[path] = {
+            "kind": "file", "uid": 0, "gid": 0, "mode": mode,
+            "is_symlink": False,
+        }
+
+    def chown(self, path, uid, gid):
+        self.calls.append(("chown", path, uid, gid))
+        self._maybe_fail("chown")
+        self.objects[path]["uid"] = uid
+        self.objects[path]["gid"] = gid
+
+    def chmod(self, path, mode):
+        self.calls.append(("chmod", path, mode))
+        self._maybe_fail("chmod")
+        self.objects[path]["mode"] = mode
+
+    def rmdir(self, path):
+        self.calls.append(("rmdir", path))
+        self.objects.pop(path, None)
+
+    def unlink(self, path):
+        self.calls.append(("unlink", path))
+        self.objects.pop(path, None)
+
+    def call_names(self):
+        return [c[0] for c in self.calls]
+
+
+class PrepareProtectedTargetTests(unittest.TestCase):
+    DIR = "/case/recovered/testdisk"
+    UID = 999
+    GID = 991
+
+    def _prep_dir(self, fs):
+        return _prepare_protected_target(
+            self.DIR, kind="dir", owner_uid=self.UID, owner_gid=self.GID,
+            required_mode=_TESTDISK_RECOVERED_DIR_MODE, fs_ops=fs,
+        )
+
+    def test_clean_creation_success(self):
+        fs = FakeOutputFsOps()
+        result = self._prep_dir(fs)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_TARGET_PREPARED")
+        self.assertTrue(result["created"])
+        entry = fs.objects[self.DIR]
+        self.assertEqual(entry["kind"], "dir")
+        self.assertEqual((entry["uid"], entry["gid"]), (self.UID, self.GID))
+        self.assertEqual(entry["mode"], _TESTDISK_RECOVERED_DIR_MODE)
+        names = fs.call_names()
+        self.assertLess(names.index("chown"), names.index("chmod"))
+
+    def test_valid_preexisting_target_accepted(self):
+        fs = FakeOutputFsOps()
+        fs.seed(self.DIR, kind="dir", uid=self.UID, gid=self.GID,
+                mode=_TESTDISK_RECOVERED_DIR_MODE)
+        result = self._prep_dir(fs)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_TARGET_OK")
+        self.assertFalse(result["created"])
+        # An accepted pre-existing target is not re-created.
+        self.assertNotIn("mkdir", fs.call_names())
+
+    def test_wrong_owner_preexisting_refused_not_deleted(self):
+        fs = FakeOutputFsOps()
+        fs.seed(self.DIR, kind="dir", uid=0, gid=0,
+                mode=_TESTDISK_RECOVERED_DIR_MODE)
+        result = self._prep_dir(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_WRONG_OWNER")
+        self.assertIn(self.DIR, fs.objects)
+        self.assertNotIn("rmdir", fs.call_names())
+
+    def test_wrong_mode_preexisting_refused_not_deleted(self):
+        fs = FakeOutputFsOps()
+        fs.seed(self.DIR, kind="dir", uid=self.UID, gid=self.GID, mode=0o755)
+        result = self._prep_dir(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_WRONG_MODE")
+        self.assertIn(self.DIR, fs.objects)
+
+    def test_symlink_preexisting_refused_not_deleted(self):
+        fs = FakeOutputFsOps()
+        fs.seed(self.DIR, kind="dir", uid=self.UID, gid=self.GID,
+                mode=_TESTDISK_RECOVERED_DIR_MODE, is_symlink=True)
+        result = self._prep_dir(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_IS_SYMLINK")
+        self.assertIn(self.DIR, fs.objects)
+        self.assertNotIn("rmdir", fs.call_names())
+
+    def test_type_mismatch_refused_not_deleted(self):
+        # A regular file where a directory is expected.
+        fs = FakeOutputFsOps()
+        fs.seed(self.DIR, kind="file", uid=self.UID, gid=self.GID,
+                mode=_TESTDISK_RECOVERED_DIR_MODE)
+        result = self._prep_dir(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_WRONG_TYPE")
+        self.assertIn(self.DIR, fs.objects)
+
+    def test_ownership_failure_cleans_only_created_object(self):
+        fs = FakeOutputFsOps(fail_on={"chown"})
+        result = self._prep_dir(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_OWNERSHIP_FAILED")
+        # The object we created is rolled back.
+        self.assertNotIn(self.DIR, fs.objects)
+        self.assertIn("rmdir", fs.call_names())
+
+
+class PrepareTestdiskOutputTargetsTests(unittest.TestCase):
+    DIR = "/case/recovered/testdisk"
+    LOG = "/case/evidence/testdisk.log"
+    UID = 999
+    GID = 991
+
+    def _prep(self, fs):
+        return _prepare_testdisk_output_targets(
+            self.DIR, self.LOG, owner_uid=self.UID, owner_gid=self.GID,
+            fs_ops=fs,
+        )
+
+    def test_clean_creation_of_both_targets(self):
+        fs = FakeOutputFsOps()
+        result = self._prep(fs)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_TARGETS_PREPARED")
+        self.assertEqual(fs.objects[self.DIR]["kind"], "dir")
+        self.assertEqual(fs.objects[self.DIR]["mode"],
+                         _TESTDISK_RECOVERED_DIR_MODE)
+        self.assertEqual(fs.objects[self.LOG]["kind"], "file")
+        self.assertEqual(fs.objects[self.LOG]["mode"], _TESTDISK_LOG_MODE)
+        self.assertEqual((fs.objects[self.LOG]["uid"],
+                          fs.objects[self.LOG]["gid"]), (self.UID, self.GID))
+
+    def test_partial_failure_rolls_back_created_dir(self):
+        # Directory created by us, then the log fails: the dir is rolled back.
+        fs = FakeOutputFsOps(fail_on={"create_regular_file"})
+        result = self._prep(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_CREATE_FAILED")
+        self.assertNotIn(self.DIR, fs.objects)
+        self.assertIn("rmdir", fs.call_names())
+
+    def test_cleanup_affects_only_newly_created_objects(self):
+        # Directory pre-exists and is valid (created=False); the log fails.
+        # The pre-existing directory must NOT be deleted.
+        fs = FakeOutputFsOps(fail_on={"create_regular_file"})
+        fs.seed(self.DIR, kind="dir", uid=self.UID, gid=self.GID,
+                mode=_TESTDISK_RECOVERED_DIR_MODE)
+        result = self._prep(fs)
+        self.assertFalse(result["success"])
+        self.assertIn(self.DIR, fs.objects)
+        self.assertNotIn("rmdir", fs.call_names())
 
 
 if __name__ == "__main__":

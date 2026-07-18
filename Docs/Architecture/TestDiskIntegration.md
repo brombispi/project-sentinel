@@ -162,13 +162,17 @@ responsibility per subsystem), and the Result Contract / Artifact Ownership of
   3. **verify** the copy (size equals `st_size`; mechanism-appropriate integrity
      check),
   4. **`fsync` the temp file before the rename** so its bytes are durable,
-  5. **`rename`** `…​.tmp` → `working/testdisk.img` (atomic on the same
+  5. **`chown` + `chmod` the `.tmp` to the recovery uid:gid and mode `0600`
+     *before* the rename**, so `working/testdisk.img` already has the correct
+     owner and mode the instant it appears under its final name — there is never
+     a window in which the final file is owned by the privileged preparer,
+  6. **`rename`** `…​.tmp` → `working/testdisk.img` (atomic on the same
      filesystem),
-  6. **`fsync` the containing directory after the rename** so the new directory
+  7. **`fsync` the containing directory after the rename** so the new directory
      entry is durable,
-  7. **`chown`** the finished file to the recovery uid:gid (mode `0600`),
-  8. on any failure **unlink the `.tmp`** (and, after the rename, the finished
-     file) and leave no partial `working/testdisk.img`.
+  8. on any **pre-rename** failure **unlink the `.tmp`** (no final file is ever
+     created); on a failure **after** the rename, unlink the finished file, so
+     no partial or wrongly-owned `working/testdisk.img` is left behind.
   A pre-existing stray `working/testdisk.img.tmp` from an interrupted prior run
   is removed before step 1. A working copy is recreated only after SENTINEL
   obtained replace confirmation.
@@ -362,8 +366,9 @@ working copy**:
   host (§11).
 - **Atomic working-copy completion.** A half-written working copy must not be
   usable; prep follows create-`.tmp`-restricted-`0600` → copy → verify →
-  `fsync` file (before rename) → `rename` → `fsync` directory (after rename) →
-  `chown` → cleanup-on-failure (§3), so it either yields a complete copy or
+  `fsync` file → `chown` + `chmod` the `.tmp` (before rename) → `rename` →
+  `fsync` directory (after rename) → cleanup-on-failure (§3), so it either
+  yields a complete, correctly-owned copy or
   fails cleanly
   before `RECOVERING` with no partial `working/testdisk.img`
   (`RecoveryOperationStandard.md` Idempotency / Safety). The copy *mechanism*
@@ -432,11 +437,15 @@ The following are **configuration**, not fixed application constants:
 - **Recovery account** — the confined identity's name (or uid/gid). Default /
   reference value: **`sentinel-recovery`** (validated in §11). Resolved by name
   to uid/gid at runtime; never assume a specific numeric uid/gid.
-- **Privilege-drop command** — a configurable command template that drops to the
-  recovery identity, clears supplementary group membership, and execs TestDisk.
-  The reference implementation uses `setpriv --reuid=<uid> --regid=<gid>
-  --clear-groups -- …` (§11); any mechanism giving the same guarantees is
-  acceptable.
+- **Privilege-drop mechanism** — a constrained mechanism *type*, **not** a
+  free-form command template. Configuration names the mechanism only; the argv
+  is built in code, so a command template (and its injection/validation risk)
+  can never enter through configuration. The only mechanism supported today is
+  **`setpriv`**, for which code builds `setpriv --reuid=<uid> --regid=<gid>
+  --clear-groups -- testdisk /log working/testdisk.img` (§11). Additional
+  mechanisms giving the same guarantees may be added to the supported set later;
+  an unknown mechanism name is rejected at configuration read time
+  (`TESTDISK_CONFIG_INVALID_MECHANISM`).
 - **Execution mode** — how the drop is invoked. Sentinel must support:
   - **root** — Sentinel already runs as root; it performs the drop directly (no
     `sudo` needed).
@@ -464,7 +473,7 @@ helpers in `Source/i18n/translator.py` (`read_testdisk_config`).
 |---|---|---|---|
 | `recovery_account` | **required** | non-empty string | none |
 | `forbidden_groups` | **required** | non-empty list of non-empty strings | none |
-| `privilege_drop_mechanism` | **required** | non-empty string | none |
+| `privilege_drop_mechanism` | **required** | one of the supported mechanisms (currently only `setpriv`) | none |
 | `execution_mode` | **required** | one of `root`, `sudo`, `external` | none |
 | `working_copy_safety_margin_bytes` | optional | non-negative integer | `67108864` (64 MiB) |
 
@@ -532,6 +541,33 @@ parent lacks the "others execute" bit for the recovery identity, writes fail wit
   other unprivileged users; only traversal is granted on the structural path.
 
 (This requirement was discovered and confirmed on the reference host — see §11.)
+
+### Implemented execution foundation (root mode)
+
+The first executable slice supports **`execution_mode == "root"` only**:
+
+- Sentinel must already be root (`geteuid() == 0`); it drops to the confined
+  recovery identity with `setpriv` (the only supported `privilege_drop_mechanism`)
+  and re-execs TestDisk. No `sudo` wrapping and no shell are used, and the argv is
+  built entirely in code (`setpriv --reuid=<uid> --regid=<gid> --clear-groups --
+  testdisk /log working/testdisk.img`).
+- `sudo` and `external` remain **accepted configuration** values but are refused
+  at runtime with distinct fail-closed codes
+  (`TESTDISK_EXECUTION_MODE_SUDO_NOT_EXECUTABLE_YET`,
+  `TESTDISK_EXECUTION_MODE_EXTERNAL_NOT_EXECUTABLE_YET`) so no unsupported posture
+  can silently execute.
+- `recovered/testdisk/` (dir, `0700`) and `evidence/testdisk.log` (regular file,
+  `0640`) are prepared fail-closed and recovery-owned: a missing target is created
+  exclusively (no symlink is ever followed), owned, moded, and re-validated; a
+  pre-existing target is accepted only if it is a real object of the expected type
+  with the exact required owner and mode, and a structurally wrong pre-existing
+  target is refused but **never deleted**. Only objects a preparation attempt
+  created are cleaned up on failure; structural parents are never `chown`ed.
+- All prerequisite validation and privileged preparation complete **before** any
+  lifecycle change: `prepare_testdisk_execution(...)` performs no status
+  transition, appends no `recovery_operations` record, and persists nothing;
+  `execute_testdisk_recovery(...)` only runs the prepared argv and summarizes
+  `recovered/testdisk/`.
 
 ---
 

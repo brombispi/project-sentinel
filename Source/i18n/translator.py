@@ -103,6 +103,12 @@ def persist_language(project_root, language):
 # host-specific value.
 TESTDISK_DEFAULT_SAFETY_MARGIN_BYTES = 64 * 1024 * 1024
 _TESTDISK_EXECUTION_MODES = ("root", "sudo", "external")
+# Privilege-drop mechanisms Sentinel can actually construct a command for. Only
+# setpriv is supported today (§7A / §11); an arbitrary command name/template is
+# NOT accepted, so command-injection and unvalidated-template risks cannot enter
+# through configuration. This is a supported-set check, not a default: the field
+# stays required and host configuration must still name it explicitly.
+_TESTDISK_SUPPORTED_DROP_MECHANISMS = ("setpriv",)
 
 
 def _testdisk_config_error(code, message, *, field=None):
@@ -164,6 +170,13 @@ def _validate_testdisk_block(block):
     mechanism, error = _require_config_string(block, "privilege_drop_mechanism")
     if error is not None:
         return error
+    if mechanism not in _TESTDISK_SUPPORTED_DROP_MECHANISMS:
+        return _testdisk_config_error(
+            "TESTDISK_CONFIG_INVALID_MECHANISM",
+            f"Unsupported privilege_drop_mechanism: {mechanism}. "
+            f"Supported: {', '.join(_TESTDISK_SUPPORTED_DROP_MECHANISMS)}.",
+            field="privilege_drop_mechanism",
+        )
     normalized["privilege_drop_mechanism"] = mechanism
 
     mode = block.get("execution_mode")
@@ -224,8 +237,9 @@ def read_testdisk_config(project_root):
         unavailable.
       * {"success": False, "code": ..., "message": ..., ["field": ...]} — the
         block is present but invalid (malformed JSON, non-object block, a
-        missing/blank/wrong-typed required field, an unsupported execution mode,
-        or a negative margin). The caller fails closed on the structured error.
+        missing/blank/wrong-typed required field, an unsupported privilege-drop
+        mechanism, an unsupported execution mode, or a negative margin). The
+        caller fails closed on the structured error.
       * {"success": True, "config": {...}} — a validated, normalized config with
         recovery_account, forbidden_groups, privilege_drop_mechanism,
         execution_mode, and working_copy_safety_margin_bytes (defaulted to

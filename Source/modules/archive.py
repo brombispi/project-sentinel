@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -1489,6 +1490,11 @@ def execute_photorec_recovery(session):
 
 _TESTDISK_WORKING_COPY_FILENAME = "testdisk.img"
 _TESTDISK_WORKING_COPY_TMP_SUFFIX = ".tmp"
+_TESTDISK_LOG_FILENAME = "testdisk.log"
+# The only privilege-drop mechanism this slice can construct a command for. Kept
+# in sync with translator._TESTDISK_SUPPORTED_DROP_MECHANISMS; the command
+# builder refuses anything else.
+_TESTDISK_DROP_MECHANISM_SETPRIV = "setpriv"
 # Conservative headroom required on the working/ filesystem in addition to a
 # full-size copy of the canonical image. Not host-specific; overridable per call.
 _TESTDISK_WORKING_COPY_SAFETY_MARGIN_BYTES = 64 * 1024 * 1024
@@ -2116,6 +2122,26 @@ class _DefaultTestdiskFsOps:
     def chmod(self, path, mode):
         os.chmod(path, mode)
 
+    def lstat(self, path):
+        # lstat (not stat) so a symlink is reported as a symlink and never
+        # silently followed to its target during output/log validation.
+        return os.lstat(path)
+
+    def mkdir(self, path, mode):
+        # Fails (FileExistsError) if any object — including a symlink — already
+        # exists at the path, so a pre-existing symlink is never followed.
+        os.mkdir(path, mode)
+
+    def create_regular_file(self, path, mode):
+        # O_CREAT|O_EXCL creates a brand-new regular file and fails
+        # (FileExistsError) if the path already exists, including when it is a
+        # symlink; the symlink is therefore never followed or clobbered.
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        os.close(descriptor)
+
+    def rmdir(self, path):
+        os.rmdir(path)
+
 
 def _prepare_testdisk_working_copy(
     source_image_path,
@@ -2131,15 +2157,18 @@ def _prepare_testdisk_working_copy(
     failure-safe completion (TestDiskIntegration.md §3):
 
         remove stale .tmp -> create restricted (0600) .tmp -> copy -> verify
-        size -> fsync file -> atomic rename -> fsync directory -> chown/chmod
+        size -> fsync file -> chown/chmod .tmp -> atomic rename -> fsync
+        directory
 
     The temporary file is created with restrictive permissions BEFORE any image
     bytes are written, so the working copy is never transiently world-readable.
-    The file is fsync'd BEFORE the rename; the containing directory is fsync'd
-    AFTER the rename (so the new directory entry is durable). On any failure the
-    temporary file is removed and no partial working/testdisk.img is left behind.
-    All filesystem interactions go through the injected fs_ops so tests need no
-    root and no real disk.
+    The file is fsync'd BEFORE the rename; ownership and mode are applied to the
+    temporary file BEFORE the rename so the final file is never briefly owned by
+    the privileged preparer; the containing directory is fsync'd AFTER the
+    rename (so the new directory entry is durable). On any pre-rename failure the
+    temporary file is removed and no final file is created; on a failure after
+    the rename the final file is removed. All filesystem interactions go through
+    the injected fs_ops so tests need no root and no real disk.
     """
 
     fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
@@ -2247,6 +2276,27 @@ def _prepare_testdisk_working_copy(
                 display_args={"error": str(error)},
             )
 
+        # Apply ownership/mode to the temporary file BEFORE the atomic rename so
+        # that working/testdisk.img already has the recovery identity and mode
+        # the instant it appears under its final name. Doing this after the
+        # rename would leave a brief window where the final file is owned by the
+        # privileged (root) preparer; ordering it here removes that window
+        # entirely (TestDiskIntegration.md §3/§7A). Failure here is a pre-rename
+        # failure: only the temporary file is cleaned up and no final file is
+        # ever created.
+        try:
+            fs.chown(str(tmp_path), owner_uid, owner_gid)
+            fs.chmod(str(tmp_path), file_mode)
+        except OSError as error:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED",
+                f"Working-copy ownership/mode could not be applied: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+
         try:
             fs.rename(str(tmp_path), str(final_path))
             final_created = True
@@ -2268,19 +2318,6 @@ def _prepare_testdisk_working_copy(
                 False,
                 "TESTDISK_WORKING_COPY_FSYNC_FAILED",
                 f"Working directory fsync failed: {error}",
-                status="failed",
-                display_args={"error": str(error)},
-            )
-
-        try:
-            fs.chown(str(final_path), owner_uid, owner_gid)
-            fs.chmod(str(final_path), file_mode)
-        except OSError as error:
-            _cleanup(True)
-            return _testdisk_result(
-                False,
-                "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED",
-                f"Working-copy ownership/mode could not be applied: {error}",
                 status="failed",
                 display_args={"error": str(error)},
             )
@@ -2341,3 +2378,646 @@ def _validate_execution_target(
         status="ok",
         target=target,
     )
+
+
+# ---------------------------------------------------------------------------
+# Protected output/log target preparation.
+#
+# Prepares recovered/testdisk/ (directory, recovery-owned, exactly 0700) and
+# evidence/testdisk.log (regular file, recovery-owned, exactly 0640). Both are
+# prepared fail-closed and without ever following a pre-existing symlink: a
+# missing target is created exclusively (mkdir / O_CREAT|O_EXCL), owned and
+# moded, then re-validated; a pre-existing target is accepted only if it is a
+# real object of the expected type with the exact required owner and mode. A
+# structurally wrong pre-existing target is refused but NEVER deleted (it may be
+# legitimate operator/evidence data); only objects this attempt created are
+# cleaned up on failure. Structural parents are never chowned.
+# ---------------------------------------------------------------------------
+
+
+def _object_matches_kind(mode, kind):
+    if kind == "dir":
+        return stat.S_ISDIR(mode)
+    return stat.S_ISREG(mode)
+
+
+def _cleanup_created_target(path, kind, fs_ops):
+    try:
+        if kind == "dir":
+            fs_ops.rmdir(str(path))
+        else:
+            fs_ops.unlink(str(path))
+    except OSError:
+        pass
+
+
+def _prepare_protected_target(
+    path,
+    *,
+    kind,
+    owner_uid,
+    owner_gid,
+    required_mode,
+    fs_ops,
+):
+    """
+    Prepare a single protected output target (a directory or a regular file).
+
+    Returns a structured result carrying an extra "created" flag: True when this
+    call created the object (and is therefore responsible for cleaning it up on a
+    later failure), False when a valid target already existed. Fail-closed on any
+    stat/create/chown/chmod/validation failure; a pre-existing symlink or a
+    wrong-typed/wrong-owner/wrong-mode pre-existing object is refused and left
+    untouched.
+    """
+
+    target = str(path)
+
+    try:
+        info = fs_ops.lstat(target)
+        existed = True
+    except FileNotFoundError:
+        existed = False
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_OUTPUT_STAT_FAILED",
+            f"Output target could not be inspected: {error}",
+            status="failed",
+            display_args={"path": target, "error": str(error)},
+            created=False,
+        )
+
+    if existed:
+        if stat.S_ISLNK(info.st_mode):
+            return _testdisk_result(
+                False,
+                "TESTDISK_OUTPUT_IS_SYMLINK",
+                f"Output target is a symlink; refusing to use it: {target}",
+                status="refused",
+                display_args={"path": target},
+                created=False,
+            )
+        if not _object_matches_kind(info.st_mode, kind):
+            return _testdisk_result(
+                False,
+                "TESTDISK_OUTPUT_WRONG_TYPE",
+                f"Output target is not a {kind}: {target}",
+                status="refused",
+                display_args={"path": target, "expected_kind": kind},
+                created=False,
+            )
+        if info.st_uid != owner_uid or info.st_gid != owner_gid:
+            return _testdisk_result(
+                False,
+                "TESTDISK_OUTPUT_WRONG_OWNER",
+                f"Output target is not owned by the recovery identity: {target}",
+                status="refused",
+                display_args={"path": target},
+                created=False,
+            )
+        if stat.S_IMODE(info.st_mode) != required_mode:
+            return _testdisk_result(
+                False,
+                "TESTDISK_OUTPUT_WRONG_MODE",
+                f"Output target has an unexpected mode: {target}",
+                status="refused",
+                display_args={
+                    "path": target,
+                    "expected_mode": oct(required_mode),
+                    "actual_mode": oct(stat.S_IMODE(info.st_mode)),
+                },
+                created=False,
+            )
+        return _testdisk_result(
+            True,
+            "TESTDISK_OUTPUT_TARGET_OK",
+            f"Existing output target accepted: {target}",
+            status="ok",
+            path=target,
+            created=False,
+        )
+
+    try:
+        if kind == "dir":
+            fs_ops.mkdir(target, required_mode)
+        else:
+            fs_ops.create_regular_file(target, required_mode)
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_OUTPUT_CREATE_FAILED",
+            f"Output target could not be created: {error}",
+            status="failed",
+            display_args={"path": target, "error": str(error)},
+            created=False,
+        )
+
+    try:
+        fs_ops.chown(target, owner_uid, owner_gid)
+        fs_ops.chmod(target, required_mode)
+    except OSError as error:
+        _cleanup_created_target(target, kind, fs_ops)
+        return _testdisk_result(
+            False,
+            "TESTDISK_OUTPUT_OWNERSHIP_FAILED",
+            f"Output target ownership/mode could not be applied: {error}",
+            status="failed",
+            display_args={"path": target, "error": str(error)},
+            created=False,
+        )
+
+    try:
+        info = fs_ops.lstat(target)
+    except OSError as error:
+        _cleanup_created_target(target, kind, fs_ops)
+        return _testdisk_result(
+            False,
+            "TESTDISK_OUTPUT_STAT_FAILED",
+            f"Output target could not be re-inspected: {error}",
+            status="failed",
+            display_args={"path": target, "error": str(error)},
+            created=False,
+        )
+
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not _object_matches_kind(info.st_mode, kind)
+        or info.st_uid != owner_uid
+        or info.st_gid != owner_gid
+        or stat.S_IMODE(info.st_mode) != required_mode
+    ):
+        _cleanup_created_target(target, kind, fs_ops)
+        return _testdisk_result(
+            False,
+            "TESTDISK_OUTPUT_VALIDATION_FAILED",
+            f"Freshly created output target failed validation: {target}",
+            status="failed",
+            display_args={"path": target},
+            created=False,
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_OUTPUT_TARGET_PREPARED",
+        f"Output target prepared: {target}",
+        status="completed",
+        path=target,
+        created=True,
+    )
+
+
+def _prepare_testdisk_output_targets(
+    recovered_testdisk_dir,
+    log_path,
+    *,
+    owner_uid,
+    owner_gid,
+    fs_ops,
+):
+    """
+    Prepare recovered/testdisk/ (0700 dir) and evidence/testdisk.log (0640 file),
+    both recovery-owned. If the log preparation fails after this attempt created
+    the recovered/testdisk/ directory, that directory is rolled back so no
+    partial preparation is left behind; a pre-existing (accepted) directory is
+    never removed. Fail-closed.
+    """
+
+    dir_result = _prepare_protected_target(
+        recovered_testdisk_dir,
+        kind="dir",
+        owner_uid=owner_uid,
+        owner_gid=owner_gid,
+        required_mode=_TESTDISK_RECOVERED_DIR_MODE,
+        fs_ops=fs_ops,
+    )
+    if not dir_result["success"]:
+        return dir_result
+
+    log_result = _prepare_protected_target(
+        log_path,
+        kind="file",
+        owner_uid=owner_uid,
+        owner_gid=owner_gid,
+        required_mode=_TESTDISK_LOG_MODE,
+        fs_ops=fs_ops,
+    )
+    if not log_result["success"]:
+        if dir_result.get("created"):
+            _cleanup_created_target(recovered_testdisk_dir, "dir", fs_ops)
+        return log_result
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_OUTPUT_TARGETS_PREPARED",
+        "Recovered directory and log target prepared.",
+        status="completed",
+        recovered_directory=str(recovered_testdisk_dir),
+        log_path=str(log_path),
+        recovered_directory_created=dir_result.get("created", False),
+        log_created=log_result.get("created", False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Root-mode command construction and execution preparation/orchestration.
+#
+# This slice supports execution_mode == "root" only: Sentinel must already be
+# root (geteuid() == 0) and drops to the confined recovery identity with setpriv
+# to run TestDisk. "sudo" and "external" remain accepted *configuration* modes
+# but are refused at runtime with distinct "not executable yet" codes. No shell
+# is ever used and no command template comes from configuration.
+# ---------------------------------------------------------------------------
+
+
+def _build_testdisk_root_command(
+    mechanism,
+    recovery_uid,
+    recovery_gid,
+    working_image_path,
+):
+    """
+    Build the exact root-mode TestDisk argv (list form, no shell). The drop is
+    performed by setpriv, which clears supplementary groups and re-execs TestDisk
+    as the confined recovery identity:
+
+        setpriv --reuid=<uid> --regid=<gid> --clear-groups -- \
+            testdisk /log <working-image-path>
+
+    Defensive pure helper: the caller must have already validated the mechanism
+    (setpriv), the identity (non-root integer uid/gid), and the working target
+    (via _validate_execution_target). Raises ValueError on any invalid input so
+    a malformed command can never be constructed.
+    """
+
+    if mechanism != _TESTDISK_DROP_MECHANISM_SETPRIV:
+        raise ValueError(
+            f"Unsupported privilege-drop mechanism: {mechanism!r}"
+        )
+
+    if isinstance(recovery_uid, bool) or not isinstance(recovery_uid, int):
+        raise ValueError("recovery uid must be an integer")
+    if isinstance(recovery_gid, bool) or not isinstance(recovery_gid, int):
+        raise ValueError("recovery gid must be an integer")
+    if recovery_uid == 0 or recovery_gid == 0:
+        raise ValueError("recovery identity must not be root (uid/gid 0)")
+
+    working = str(working_image_path)
+    if not working.strip():
+        raise ValueError("working image path must be provided")
+
+    return [
+        "setpriv",
+        f"--reuid={recovery_uid}",
+        f"--regid={recovery_gid}",
+        "--clear-groups",
+        "--",
+        "testdisk",
+        "/log",
+        working,
+    ]
+
+
+def _validate_testdisk_config_structure(testdisk_config):
+    """
+    Defensively validate the normalized TestDisk config structure the caller
+    passes in (as produced by translator.read_testdisk_config()["config"]).
+    Returns None when the structure is usable, or a fail-closed result.
+    """
+
+    if not isinstance(testdisk_config, dict):
+        return _testdisk_result(
+            False,
+            "TESTDISK_CONFIG_STRUCTURE_INVALID",
+            "TestDisk configuration structure is missing or malformed.",
+            status="refused",
+        )
+
+    account = testdisk_config.get("recovery_account")
+    if not isinstance(account, str) or not account.strip():
+        return _testdisk_result(
+            False,
+            "TESTDISK_CONFIG_STRUCTURE_INVALID",
+            "TestDisk configuration is missing a valid recovery_account.",
+            status="refused",
+        )
+
+    groups = testdisk_config.get("forbidden_groups")
+    if not isinstance(groups, list) or not all(
+        isinstance(name, str) for name in groups
+    ):
+        return _testdisk_result(
+            False,
+            "TESTDISK_CONFIG_STRUCTURE_INVALID",
+            "TestDisk configuration is missing valid forbidden_groups.",
+            status="refused",
+        )
+
+    mechanism = testdisk_config.get("privilege_drop_mechanism")
+    if not isinstance(mechanism, str) or not mechanism.strip():
+        return _testdisk_result(
+            False,
+            "TESTDISK_CONFIG_STRUCTURE_INVALID",
+            "TestDisk configuration is missing a valid "
+            "privilege_drop_mechanism.",
+            status="refused",
+        )
+
+    mode = testdisk_config.get("execution_mode")
+    if not isinstance(mode, str) or not mode.strip():
+        return _testdisk_result(
+            False,
+            "TESTDISK_CONFIG_STRUCTURE_INVALID",
+            "TestDisk configuration is missing a valid execution_mode.",
+            status="refused",
+        )
+
+    margin = testdisk_config.get(
+        "working_copy_safety_margin_bytes",
+        _TESTDISK_WORKING_COPY_SAFETY_MARGIN_BYTES,
+    )
+    if isinstance(margin, bool) or not isinstance(margin, int) or margin < 0:
+        return _testdisk_result(
+            False,
+            "TESTDISK_CONFIG_STRUCTURE_INVALID",
+            "TestDisk configuration has an invalid "
+            "working_copy_safety_margin_bytes.",
+            status="refused",
+        )
+
+    return None
+
+
+def prepare_testdisk_execution(
+    session,
+    testdisk_config,
+    *,
+    identity_resolver=_default_identity_resolver,
+    command_exists=_default_command_exists,
+    geteuid=_default_geteuid,
+    stat_provider=_default_stat_provider,
+    statvfs_provider=_default_statvfs_provider,
+    fs_ops=None,
+):
+    """
+    Perform all fail-closed prerequisite validation and privileged preparation
+    for a root-mode TestDisk run, WITHOUT executing TestDisk, changing session
+    status, creating a recovery-operations record, persisting anything, or
+    touching the canonical image.
+
+    On success returns a structured result (status "prepared") carrying the
+    normalized data execute_testdisk_recovery() needs: recovery uid/gid, the
+    exact argv, the cwd (evidence dir), the working image path, the recovered
+    directory path, and the log path. Any failure returns a fail-closed result
+    with a distinct code and performs no partial, unsafe state.
+    """
+
+    fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
+
+    structure_error = _validate_testdisk_config_structure(testdisk_config)
+    if structure_error is not None:
+        return structure_error
+
+    mode = testdisk_config["execution_mode"].strip().lower()
+    mechanism = testdisk_config["privilege_drop_mechanism"].strip()
+    account = testdisk_config["recovery_account"].strip()
+    forbidden_groups = list(testdisk_config.get("forbidden_groups", []))
+    safety_margin_bytes = testdisk_config.get(
+        "working_copy_safety_margin_bytes",
+        _TESTDISK_WORKING_COPY_SAFETY_MARGIN_BYTES,
+    )
+
+    if mode == "sudo":
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTION_MODE_SUDO_NOT_EXECUTABLE_YET",
+            "Execution mode 'sudo' is accepted in configuration but is not "
+            "executable yet; only root mode runs in this slice.",
+            status="refused",
+            display_args={"mode": mode},
+        )
+
+    if mode == "external":
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTION_MODE_EXTERNAL_NOT_EXECUTABLE_YET",
+            "Execution mode 'external' is accepted in configuration but is not "
+            "executable yet; only root mode runs in this slice.",
+            status="refused",
+            display_args={"mode": mode},
+        )
+
+    if mode != "root":
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTION_MODE_INVALID",
+            f"Unsupported execution mode: {mode}",
+            status="refused",
+            display_args={"mode": mode},
+        )
+
+    if geteuid() != 0:
+        return _testdisk_result(
+            False,
+            "TESTDISK_REQUIRES_ROOT",
+            "Root execution mode requires Sentinel to run as root "
+            "(geteuid() == 0).",
+            status="refused",
+        )
+
+    if not command_exists("testdisk"):
+        return _testdisk_result(
+            False,
+            "TESTDISK_BINARY_MISSING",
+            "TestDisk is not installed (not found on PATH).",
+            status="refused",
+        )
+
+    if mechanism != _TESTDISK_DROP_MECHANISM_SETPRIV:
+        return _testdisk_result(
+            False,
+            "TESTDISK_DROP_MECHANISM_UNSUPPORTED",
+            f"Unsupported privilege-drop mechanism: {mechanism}",
+            status="refused",
+            display_args={"mechanism": mechanism},
+        )
+
+    mechanism_result = _validate_privilege_drop_mechanism(
+        mechanism, command_exists=command_exists
+    )
+    if not mechanism_result["success"]:
+        return mechanism_result
+
+    identity_result = _resolve_recovery_identity(
+        account, identity_resolver=identity_resolver
+    )
+    if not identity_result["success"]:
+        return identity_result
+    identity = identity_result["identity"]
+
+    safe_result = _reject_unsafe_recovery_identity(identity, forbidden_groups)
+    if not safe_result["success"]:
+        return safe_result
+
+    recovery_path = Path(session.recovery_path)
+    canonical_image = recovery_path / "images" / "source.img"
+    working_dir = recovery_path / "working"
+    working_image = working_dir / _TESTDISK_WORKING_COPY_FILENAME
+    recovered_dir = recovery_path / "recovered"
+    recovered_testdisk = recovered_dir / TESTDISK_RECOVERED_DIRNAME
+    evidence_dir = recovery_path / "evidence"
+    log_path = evidence_dir / _TESTDISK_LOG_FILENAME
+
+    canonical_result = _validate_canonical_protection(
+        canonical_image, identity, stat_provider=stat_provider
+    )
+    if not canonical_result["success"]:
+        return canonical_result
+
+    source_device_path = (
+        session.source_device.path if session.source_device else None
+    )
+    target_result = _validate_execution_target(
+        working_image,
+        canonical_image_path=canonical_image,
+        source_device_path=source_device_path,
+    )
+    if not target_result["success"]:
+        return target_result
+
+    free_space_result = _check_working_free_space(
+        canonical_image,
+        working_dir,
+        safety_margin_bytes=safety_margin_bytes,
+        stat_provider=stat_provider,
+        statvfs_provider=statvfs_provider,
+    )
+    if not free_space_result["success"]:
+        return free_space_result
+
+    working_copy_result = _prepare_testdisk_working_copy(
+        canonical_image,
+        working_dir,
+        owner_uid=identity["uid"],
+        owner_gid=identity["gid"],
+        fs_ops=fs,
+    )
+    if not working_copy_result["success"]:
+        return working_copy_result
+
+    output_result = _prepare_testdisk_output_targets(
+        recovered_testdisk,
+        log_path,
+        owner_uid=identity["uid"],
+        owner_gid=identity["gid"],
+        fs_ops=fs,
+    )
+    if not output_result["success"]:
+        return output_result
+
+    for target_path, required_mode in (
+        (working_image, _TESTDISK_WORKING_COPY_MODE),
+        (recovered_testdisk, _TESTDISK_RECOVERED_DIR_MODE),
+        (log_path, _TESTDISK_LOG_MODE),
+    ):
+        ownership_result = _validate_recovery_target(
+            target_path, identity, required_mode, stat_provider=stat_provider
+        )
+        if not ownership_result["success"]:
+            return ownership_result
+
+        traversal_result = _validate_ancestors_traversable(
+            target_path, recovery_path, stat_provider=stat_provider
+        )
+        if not traversal_result["success"]:
+            return traversal_result
+
+    argv = _build_testdisk_root_command(
+        mechanism, identity["uid"], identity["gid"], working_image
+    )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_PREPARED",
+        "TestDisk root-mode execution prepared.",
+        status="prepared",
+        recovery_uid=identity["uid"],
+        recovery_gid=identity["gid"],
+        argv=argv,
+        cwd=str(evidence_dir),
+        working_image_path=str(working_image),
+        recovered_directory=str(recovered_testdisk),
+        log_path=str(log_path),
+    )
+
+
+def execute_testdisk_recovery(preparation, *, runner=subprocess.run):
+    """
+    Execute TestDisk from an already-successful prepare_testdisk_execution()
+    result, then summarize recovered/testdisk/.
+
+    The runner (subprocess.run by default) is invoked exactly once with the
+    prepared argv and cwd set to the evidence directory. The interactive
+    terminal is preserved: no stdout/stderr/stdin capture, no shell. Only the
+    zero/non-zero exit distinction is interpreted; TestDisk's interactive
+    choices are never inspected. Returns the same recovery-result fields the
+    existing PhotoRec caller consumes.
+    """
+
+    result = {
+        "success": False,
+        "status": "failed",
+        "artifacts": [],
+        "message": "",
+        "recovered_directory_count": 0,
+        "recovered_file_count": 0,
+        "recovered_total_bytes": 0,
+    }
+
+    if (
+        not isinstance(preparation, dict)
+        or not preparation.get("success")
+        or preparation.get("status") != "prepared"
+        or not isinstance(preparation.get("argv"), list)
+        or not preparation.get("argv")
+        or not preparation.get("cwd")
+        or not preparation.get("recovered_directory")
+    ):
+        result["code"] = "TESTDISK_PREPARATION_INVALID"
+        result["message"] = (
+            "TestDisk execution requires a successful preparation result."
+        )
+        return result
+
+    argv = preparation["argv"]
+    cwd = preparation["cwd"]
+    recovered_testdisk = Path(preparation["recovered_directory"])
+
+    try:
+        completed = runner(argv, cwd=cwd)
+    except OSError as error:
+        result["code"] = "TESTDISK_LAUNCH_FAILED"
+        result["display_args"] = {"error": str(error)}
+        result["message"] = f"TestDisk could not be launched: {error}"
+        return result
+
+    (
+        result["recovered_directory_count"],
+        result["recovered_file_count"],
+        result["recovered_total_bytes"],
+        result["artifacts"],
+    ) = _count_testdisk_artifacts(recovered_testdisk.parent)
+
+    if completed.returncode == 0:
+        result["success"] = True
+        result["status"] = "ended"
+        result["code"] = "TESTDISK_ENDED_NORMALLY"
+        result["message"] = "TestDisk session ended normally."
+    else:
+        result["code"] = "TESTDISK_EXIT_CODE"
+        result["display_args"] = {"exit_code": completed.returncode}
+        result["message"] = (
+            f"TestDisk session failed with exit code {completed.returncode}."
+        )
+
+    return result

@@ -1,0 +1,482 @@
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
+sys.path.insert(0, str(SOURCE_ROOT))
+
+# ARCHIVE-internal helpers and the two module-public execution entry points.
+from modules.archive import (  # noqa: E402
+    _TESTDISK_LOG_MODE,
+    _TESTDISK_RECOVERED_DIR_MODE,
+    _TESTDISK_WORKING_COPY_MODE,
+    _build_testdisk_root_command,
+    execute_testdisk_recovery,
+    prepare_testdisk_execution,
+)
+
+RECOVERY_UID = 999
+RECOVERY_GID = 991
+
+
+def _valid_config(**overrides):
+    config = {
+        "recovery_account": "sentinel-recovery",
+        "forbidden_groups": ["disk", "sudo"],
+        "privilege_drop_mechanism": "setpriv",
+        "execution_mode": "root",
+        "working_copy_safety_margin_bytes": 0,
+    }
+    config.update(overrides)
+    return config
+
+
+def _identity(**overrides):
+    identity = {
+        "account": "sentinel-recovery",
+        "uid": RECOVERY_UID,
+        "gid": RECOVERY_GID,
+        "groups": ["sentinel-recovery"],
+        "group_gids": [RECOVERY_GID],
+    }
+    identity.update(overrides)
+    return lambda name: dict(identity)
+
+
+class FakeExecFs:
+    """
+    A single in-memory filesystem model backing every injected provider used by
+    prepare_testdisk_execution: the working-copy fs_ops, the output/log fs_ops,
+    and the stat_provider / statvfs_provider. Operations mutate the model so the
+    final validation pass observes the freshly-prepared state, exactly as a real
+    run would. Optional per-op failure injection.
+    """
+
+    BASE = "/case"
+    CANONICAL = "/case/images/source.img"
+    WORKING_DIR = "/case/working"
+    WORKING_IMAGE = "/case/working/testdisk.img"
+    RECOVERED_TESTDISK = "/case/recovered/testdisk"
+    EVIDENCE_DIR = "/case/evidence"
+    LOG = "/case/evidence/testdisk.log"
+
+    def __init__(self, *, canonical_mode=0o400, source_size=100,
+                 bavail=10 ** 9, fail_on=None):
+        self.fail_on = set(fail_on or [])
+        self.bavail = bavail
+        self.objects = {}
+        for directory in ("/case", "/case/images", "/case/working",
+                          "/case/recovered", "/case/evidence"):
+            self.objects[directory] = {
+                "kind": "dir", "uid": 0, "gid": 0, "mode": 0o755, "size": 0,
+                "is_symlink": False,
+            }
+        self.objects[self.CANONICAL] = {
+            "kind": "file", "uid": 0, "gid": 0, "mode": canonical_mode,
+            "size": source_size, "is_symlink": False,
+        }
+
+    def _maybe_fail(self, op):
+        if op in self.fail_on:
+            raise OSError(f"simulated {op} failure")
+
+    def _mode_with_type(self, entry):
+        if entry["is_symlink"]:
+            return stat.S_IFLNK | entry["mode"]
+        if entry["kind"] == "dir":
+            return stat.S_IFDIR | entry["mode"]
+        return stat.S_IFREG | entry["mode"]
+
+    # ---- working-copy fs_ops -------------------------------------------------
+    def exists(self, path):
+        return path in self.objects
+
+    def unlink(self, path):
+        self._maybe_fail("unlink")
+        self.objects.pop(path, None)
+
+    def create_secure_file(self, path, mode):
+        self._maybe_fail("create_secure_file")
+        self.objects[path] = {
+            "kind": "file", "uid": 0, "gid": 0, "mode": mode, "size": 0,
+            "is_symlink": False,
+        }
+
+    def copy(self, source, destination):
+        self._maybe_fail("copy")
+        self.objects[destination]["size"] = self.objects[source]["size"]
+
+    def size(self, path):
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        return self.objects[path]["size"]
+
+    def fsync_file(self, path):
+        self._maybe_fail("fsync_file")
+
+    def fsync_dir(self, path):
+        self._maybe_fail("fsync_dir")
+
+    def rename(self, source, destination):
+        self._maybe_fail("rename")
+        self.objects[destination] = self.objects.pop(source)
+
+    def chown(self, path, uid, gid):
+        self._maybe_fail("chown")
+        self.objects[path]["uid"] = uid
+        self.objects[path]["gid"] = gid
+
+    def chmod(self, path, mode):
+        self._maybe_fail("chmod")
+        self.objects[path]["mode"] = mode
+
+    # ---- output/log fs_ops ---------------------------------------------------
+    def lstat(self, path):
+        self._maybe_fail("lstat")
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        entry = self.objects[path]
+        return SimpleNamespace(
+            st_mode=self._mode_with_type(entry),
+            st_uid=entry["uid"], st_gid=entry["gid"],
+        )
+
+    def mkdir(self, path, mode):
+        self._maybe_fail("mkdir")
+        if path in self.objects:
+            raise FileExistsError(path)
+        self.objects[path] = {
+            "kind": "dir", "uid": 0, "gid": 0, "mode": mode, "size": 0,
+            "is_symlink": False,
+        }
+
+    def create_regular_file(self, path, mode):
+        self._maybe_fail("create_regular_file")
+        if path in self.objects:
+            raise FileExistsError(path)
+        self.objects[path] = {
+            "kind": "file", "uid": 0, "gid": 0, "mode": mode, "size": 0,
+            "is_symlink": False,
+        }
+
+    def rmdir(self, path):
+        self.objects.pop(path, None)
+
+    # ---- stat_provider / statvfs_provider ------------------------------------
+    def stat(self, path):
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        entry = self.objects[path]
+        return SimpleNamespace(
+            st_mode=self._mode_with_type(entry),
+            st_uid=entry["uid"], st_gid=entry["gid"], st_size=entry["size"],
+        )
+
+    def statvfs(self, path):
+        return SimpleNamespace(f_bavail=self.bavail, f_frsize=1)
+
+
+def _make_session():
+    return SimpleNamespace(recovery_path="/case", source_device=None,
+                           status="RECOVERING")
+
+
+def _prepare(fs, *, config=None, geteuid=lambda: 0,
+             command_exists=lambda name: True, identity_resolver=None):
+    return prepare_testdisk_execution(
+        _make_session(),
+        config if config is not None else _valid_config(),
+        identity_resolver=identity_resolver or _identity(),
+        command_exists=command_exists,
+        geteuid=geteuid,
+        stat_provider=fs.stat,
+        statvfs_provider=fs.statvfs,
+        fs_ops=fs,
+    )
+
+
+class CommandBuilderTests(unittest.TestCase):
+    def test_exact_argv(self):
+        argv = _build_testdisk_root_command(
+            "setpriv", 999, 991, "/case/working/testdisk.img"
+        )
+        self.assertEqual(
+            argv,
+            [
+                "setpriv",
+                "--reuid=999",
+                "--regid=991",
+                "--clear-groups",
+                "--",
+                "testdisk",
+                "/log",
+                "/case/working/testdisk.img",
+            ],
+        )
+
+    def test_integer_uid_gid_rendering(self):
+        argv = _build_testdisk_root_command("setpriv", 1234, 5678, "/w/img")
+        self.assertEqual(argv[1], "--reuid=1234")
+        self.assertEqual(argv[2], "--regid=5678")
+
+    def test_root_uid_refused(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_root_command("setpriv", 0, 991, "/w/img")
+
+    def test_root_gid_refused(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_root_command("setpriv", 999, 0, "/w/img")
+
+    def test_non_integer_uid_refused(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_root_command("setpriv", "999", 991, "/w/img")
+
+    def test_bool_uid_refused(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_root_command("setpriv", True, 991, "/w/img")
+
+    def test_non_setpriv_mechanism_refused(self):
+        with self.assertRaises(ValueError):
+            _build_testdisk_root_command("sudo", 999, 991, "/w/img")
+
+
+class PrepareExecutionTests(unittest.TestCase):
+    def test_root_success_returns_normalized_data(self):
+        fs = FakeExecFs()
+        result = _prepare(fs)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["code"], "TESTDISK_PREPARED")
+        self.assertEqual(result["status"], "prepared")
+        self.assertEqual(result["recovery_uid"], RECOVERY_UID)
+        self.assertEqual(result["recovery_gid"], RECOVERY_GID)
+        self.assertEqual(result["cwd"], "/case/evidence")
+        self.assertEqual(result["working_image_path"],
+                         "/case/working/testdisk.img")
+        self.assertEqual(result["recovered_directory"],
+                         "/case/recovered/testdisk")
+        self.assertEqual(result["log_path"], "/case/evidence/testdisk.log")
+        self.assertEqual(
+            result["argv"],
+            [
+                "setpriv",
+                "--reuid=999",
+                "--regid=991",
+                "--clear-groups",
+                "--",
+                "testdisk",
+                "/log",
+                "/case/working/testdisk.img",
+            ],
+        )
+        # Prepared artifacts have the required ownership and exact modes.
+        self.assertEqual(fs.objects[fs.WORKING_IMAGE]["mode"],
+                         _TESTDISK_WORKING_COPY_MODE)
+        self.assertEqual(fs.objects[fs.RECOVERED_TESTDISK]["mode"],
+                         _TESTDISK_RECOVERED_DIR_MODE)
+        self.assertEqual(fs.objects[fs.LOG]["mode"], _TESTDISK_LOG_MODE)
+        for path in (fs.WORKING_IMAGE, fs.RECOVERED_TESTDISK, fs.LOG):
+            self.assertEqual(
+                (fs.objects[path]["uid"], fs.objects[path]["gid"]),
+                (RECOVERY_UID, RECOVERY_GID),
+            )
+
+    def test_no_lifecycle_status_or_persistence_side_effects(self):
+        fs = FakeExecFs()
+        session = _make_session()
+        prepare_testdisk_execution(
+            session,
+            _valid_config(),
+            identity_resolver=_identity(),
+            command_exists=lambda name: True,
+            geteuid=lambda: 0,
+            stat_provider=fs.stat,
+            statvfs_provider=fs.statvfs,
+            fs_ops=fs,
+        )
+        # Status is untouched and no recovery-operations record was attached.
+        self.assertEqual(session.status, "RECOVERING")
+        self.assertFalse(hasattr(session, "recovery_operations"))
+
+    def test_non_root_refused(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, geteuid=lambda: 1000)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_REQUIRES_ROOT")
+
+    def test_sudo_mode_refused_not_executable_yet(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, config=_valid_config(execution_mode="sudo"))
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["code"], "TESTDISK_EXECUTION_MODE_SUDO_NOT_EXECUTABLE_YET"
+        )
+
+    def test_external_mode_refused_not_executable_yet(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, config=_valid_config(execution_mode="external"))
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["code"],
+            "TESTDISK_EXECUTION_MODE_EXTERNAL_NOT_EXECUTABLE_YET",
+        )
+
+    def test_testdisk_missing_refused(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, command_exists=lambda name: name != "testdisk")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_BINARY_MISSING")
+
+    def test_setpriv_missing_refused(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, command_exists=lambda name: name != "setpriv")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_DROP_MECHANISM_MISSING")
+
+    def test_unsafe_identity_refused(self):
+        fs = FakeExecFs()
+        result = _prepare(
+            fs,
+            identity_resolver=_identity(
+                groups=["sentinel-recovery", "disk"], group_gids=[991, 6]
+            ),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_IDENTITY_PRIVILEGED_GROUP")
+
+    def test_canonical_failure_refused(self):
+        fs = FakeExecFs(canonical_mode=0o440)
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_PERMISSIVE")
+
+    def test_free_space_failure_refused(self):
+        fs = FakeExecFs(source_size=100, bavail=10)
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_INSUFFICIENT_FREE_SPACE")
+
+    def test_working_copy_failure_refused(self):
+        fs = FakeExecFs(fail_on={"copy"})
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_COPY_FAILED")
+
+    def test_output_preparation_failure_refused(self):
+        fs = FakeExecFs(fail_on={"mkdir"})
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_OUTPUT_CREATE_FAILED")
+
+    def test_malformed_config_refused(self):
+        fs = FakeExecFs()
+        result = _prepare(fs, config={"recovery_account": "x"})
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CONFIG_STRUCTURE_INVALID")
+
+
+class RecordingRunner:
+    def __init__(self, *, returncode=0, raise_error=None):
+        self.calls = []
+        self.returncode = returncode
+        self.raise_error = raise_error
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.raise_error is not None:
+            raise self.raise_error
+        return SimpleNamespace(returncode=self.returncode)
+
+
+class ExecuteTestdiskRecoveryTests(unittest.TestCase):
+    ARGV = [
+        "setpriv", "--reuid=999", "--regid=991", "--clear-groups", "--",
+        "testdisk", "/log", "/case/working/testdisk.img",
+    ]
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.recovered = Path(self._tmp.name) / "recovered"
+        self.testdisk_dir = self.recovered / "testdisk"
+
+    def _preparation(self):
+        return {
+            "success": True,
+            "status": "prepared",
+            "code": "TESTDISK_PREPARED",
+            "message": "ok",
+            "argv": list(self.ARGV),
+            "cwd": str(Path(self._tmp.name) / "evidence"),
+            "working_image_path": "/case/working/testdisk.img",
+            "recovered_directory": str(self.testdisk_dir),
+            "log_path": "/case/evidence/testdisk.log",
+        }
+
+    def test_runner_called_exactly_once_without_shell_or_capture(self):
+        self.testdisk_dir.mkdir(parents=True)
+        runner = RecordingRunner(returncode=0)
+        prep = self._preparation()
+        execute_testdisk_recovery(prep, runner=runner)
+        self.assertEqual(len(runner.calls), 1)
+        args, kwargs = runner.calls[0]
+        self.assertEqual(args, (self.ARGV,))
+        self.assertEqual(kwargs, {"cwd": prep["cwd"]})
+
+    def test_zero_exit_is_success_ended(self):
+        self.testdisk_dir.mkdir(parents=True)
+        runner = RecordingRunner(returncode=0)
+        result = execute_testdisk_recovery(self._preparation(), runner=runner)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["status"], "ended")
+        self.assertEqual(result["code"], "TESTDISK_ENDED_NORMALLY")
+
+    def test_non_zero_exit_is_failed(self):
+        self.testdisk_dir.mkdir(parents=True)
+        runner = RecordingRunner(returncode=3)
+        result = execute_testdisk_recovery(self._preparation(), runner=runner)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["code"], "TESTDISK_EXIT_CODE")
+        self.assertEqual(result["display_args"]["exit_code"], 3)
+
+    def test_launch_oserror_is_distinct_failure(self):
+        runner = RecordingRunner(raise_error=OSError("no such binary"))
+        result = execute_testdisk_recovery(self._preparation(), runner=runner)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_LAUNCH_FAILED")
+        # The runner was invoked (launch attempt) exactly once.
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_artifact_counts_from_recovered_testdisk(self):
+        self.testdisk_dir.mkdir(parents=True)
+        (self.testdisk_dir / "recovered_1.jpg").write_bytes(b"abcde")
+        (self.testdisk_dir / "recovered_2.jpg").write_bytes(b"fg")
+        runner = RecordingRunner(returncode=0)
+        result = execute_testdisk_recovery(self._preparation(), runner=runner)
+        self.assertEqual(result["recovered_directory_count"], 1)
+        self.assertEqual(result["recovered_file_count"], 2)
+        self.assertEqual(result["recovered_total_bytes"], 7)
+        self.assertEqual(result["artifacts"], [str(self.testdisk_dir)])
+
+    def test_runner_not_called_with_failed_preparation(self):
+        runner = mock.Mock()
+        bad = self._preparation()
+        bad["success"] = False
+        result = execute_testdisk_recovery(bad, runner=runner)
+        runner.assert_not_called()
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_PREPARATION_INVALID")
+
+    def test_runner_not_called_with_malformed_preparation(self):
+        runner = mock.Mock()
+        result = execute_testdisk_recovery({"success": True}, runner=runner)
+        runner.assert_not_called()
+        self.assertEqual(result["code"], "TESTDISK_PREPARATION_INVALID")
+
+
+if __name__ == "__main__":
+    unittest.main()
