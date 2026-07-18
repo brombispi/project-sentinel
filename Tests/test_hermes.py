@@ -18,6 +18,7 @@ from modules.archive import (
     MAP_FILENAME,
     SHA256_FILENAME,
 )
+from modules.argus import SmartEvidenceError
 from modules.hermes import (
     FINGERPRINT_ARTIFACT_RELATIVE_PATH,
     Hermes,
@@ -287,6 +288,10 @@ class HermesTests(unittest.TestCase):
                 report["Device Identity"]["Destination Path"],
                 "/dev/sdc",
             )
+            self.assertEqual(
+                report["Device Identity"]["SMART Evidence"],
+                "Not recorded",
+            )
 
             self.assertEqual(report["Assessment Results"]["Decision"], "APPROVED")
             self.assertEqual(report["Assessment Results"]["Reason"], "External device.")
@@ -335,6 +340,10 @@ class HermesTests(unittest.TestCase):
 
             self.assertIsNone(report["Device Identity"]["Source Path"])
             self.assertIsNone(report["Device Identity"]["Destination Path"])
+            self.assertEqual(
+                report["Device Identity"]["SMART Evidence"],
+                "Not recorded",
+            )
 
             self.assertIsNone(report["Assessment Results"]["Decision"])
             self.assertIsNone(report["Assessment Results"]["Reason"])
@@ -821,6 +830,148 @@ class HermesTests(unittest.TestCase):
                 "Recovered Output Locations: None recorded",
                 markdown,
             )
+
+    def test_device_identity_smart_available_passed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            smart_evidence = {
+                "present": True,
+                "available": True,
+                "relative_path": "evidence/source.smart.txt",
+                "overall_health": "PASSED",
+            }
+
+            with mock.patch(
+                "modules.hermes.read_smart_evidence",
+                return_value=smart_evidence,
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            device = report["Device Identity"]
+            self.assertEqual(device["SMART Available"], "Yes")
+            self.assertEqual(device["SMART Overall Health"], "PASSED")
+            self.assertNotIn("SMART Evidence", device)
+
+    def test_device_identity_smart_available_unknown_health(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            smart_evidence = {
+                "present": True,
+                "available": True,
+                "relative_path": "evidence/source.smart.txt",
+                "overall_health": None,
+            }
+
+            with mock.patch(
+                "modules.hermes.read_smart_evidence",
+                return_value=smart_evidence,
+            ):
+                report = Hermes(session).build_technician_report()
+
+            device = report["Device Identity"]
+            self.assertEqual(device["SMART Available"], "Yes")
+            self.assertEqual(device["SMART Overall Health"], "Not reported")
+            self.assertNotIn("SMART Evidence", device)
+
+    def test_device_identity_smart_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            smart_evidence = {
+                "present": True,
+                "available": False,
+                "relative_path": "evidence/source.smart.txt",
+                "overall_health": None,
+            }
+
+            with mock.patch(
+                "modules.hermes.read_smart_evidence",
+                return_value=smart_evidence,
+            ):
+                report = Hermes(session).build_technician_report()
+
+            device = report["Device Identity"]
+            self.assertEqual(device["SMART Available"], "No")
+            self.assertNotIn("SMART Overall Health", device)
+            self.assertNotIn("SMART Evidence", device)
+
+    def test_device_identity_smart_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_smart_evidence",
+                return_value=None,
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            device = report["Device Identity"]
+            self.assertEqual(device["SMART Evidence"], "Not recorded")
+            self.assertNotIn("SMART Available", device)
+            self.assertNotIn("SMART Overall Health", device)
+
+    def test_device_identity_smart_malformed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            session = _session(case_dir)
+
+            with mock.patch(
+                "modules.hermes.read_smart_evidence",
+                side_effect=SmartEvidenceError("malformed"),
+            ) as read_mock:
+                report = Hermes(session).build_technician_report()
+
+            read_mock.assert_called_once_with(session.recovery_path)
+
+            device = report["Device Identity"]
+            self.assertEqual(device["SMART Evidence"], "Present but unreadable")
+            self.assertNotIn("SMART Available", device)
+            self.assertNotIn("SMART Overall Health", device)
+
+    def test_device_identity_smart_markdown_renders_after_device_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _populated_manifest())
+            session = _session(case_dir)
+
+            smart_evidence = {
+                "present": True,
+                "available": True,
+                "relative_path": "evidence/source.smart.txt",
+                "overall_health": "PASSED",
+            }
+
+            with mock.patch(
+                "modules.hermes.read_smart_evidence",
+                return_value=smart_evidence,
+            ):
+                markdown = Hermes(session).build_technician_markdown()
+
+            device_heading = markdown.index("## Device Identity")
+            assessment_heading = markdown.index("## Assessment Results")
+            device_section = markdown[device_heading:assessment_heading]
+
+            self.assertIn("SMART Available: Yes", device_section)
+            self.assertIn("SMART Overall Health: PASSED", device_section)
+
+            available_offset = device_section.index("SMART Available: ")
+            source_path_offset = device_section.index("Source Path: ")
+            self.assertLess(source_path_offset, available_offset)
 
     def test_imaging_details_valid_acquisition_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:

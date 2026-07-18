@@ -22,6 +22,7 @@ from modules.archive import (
     read_fingerprint_evidence,
     summarize_recovered_artifacts,
 )
+from modules.argus import SmartEvidenceError, read_smart_evidence
 from modules.manifest import read_case_manifest
 from modules.report_formatter import ReportFormatter
 
@@ -157,10 +158,29 @@ class Hermes:
         }
 
     def _build_device_identity(self, manifest):
-        return {
+        fields = {
             **_device_fields(manifest, "device", "Source"),
             **_device_fields(manifest, "destination", "Destination"),
         }
+
+        try:
+            smart = read_smart_evidence(self.session.recovery_path)
+        except SmartEvidenceError:
+            fields["SMART Evidence"] = "Present but unreadable"
+            return fields
+
+        if smart is None:
+            fields["SMART Evidence"] = "Not recorded"
+            return fields
+
+        if not smart.get("available"):
+            fields["SMART Available"] = "No"
+            return fields
+
+        fields["SMART Available"] = "Yes"
+        health = smart.get("overall_health")
+        fields["SMART Overall Health"] = health if health else "Not reported"
+        return fields
 
     def _build_assessment_results(self, manifest):
         return {
