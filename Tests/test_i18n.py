@@ -345,6 +345,9 @@ class CaseLoaderCodeTests(unittest.TestCase):
 
 
 class DeliveryWorkflowTests(unittest.TestCase):
+    TECHNICIAN_PATH = Path("/tmp/recovery/reports/technician_report.md")
+    CUSTOMER_PATH = Path("/tmp/recovery/reports/customer_report.md")
+
     def _load_delivery_function(self):
         namespace = {
             "_confirmed_yes": _load_sentinel_function("_confirmed_yes"),
@@ -354,6 +357,7 @@ class DeliveryWorkflowTests(unittest.TestCase):
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
         }
+        _load_sentinel_function("_offer_report_generation", namespace)
         delivery = _load_sentinel_function(
             "_run_delivery_workflow",
             namespace,
@@ -368,6 +372,9 @@ class DeliveryWorkflowTests(unittest.TestCase):
             recovery_result=recovery_result,
         )
 
+    def _log_messages(self, namespace):
+        return [call.args[2] for call in namespace["log_info"].call_args_list]
+
     def test_skips_prompt_when_recovery_not_successful(self):
         delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
@@ -378,50 +385,131 @@ class DeliveryWorkflowTests(unittest.TestCase):
                 self._call_delivery(delivery, namespace, session, recovery_result)
                 namespace["input"].assert_not_called()
 
-    def test_declined_does_not_generate_report(self):
+    def test_both_declined_generate_no_report_but_offer_both(self):
         delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
-        namespace["input"].return_value = "n"
+        namespace["input"].side_effect = ["n", "n"]
 
         self._call_delivery(delivery, namespace, session, {"success": True})
 
+        # Both reports are offered even when the first is declined.
+        self.assertEqual(namespace["input"].call_count, 2)
         namespace["Hermes"].assert_not_called()
         namespace["log_info"].assert_not_called()
 
-    def test_accepted_saves_report_and_logs(self):
+    def test_technician_accepted_then_customer_offered_and_declined(self):
         delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
-        report_path = Path("/tmp/recovery/reports/technician_report.md")
-        namespace["input"].return_value = "y"
-        namespace["Hermes"].return_value.save_technician_report.return_value = (
-            report_path
-        )
+        namespace["input"].side_effect = ["y", "n"]
+        hermes = namespace["Hermes"].return_value
+        hermes.save_technician_report.return_value = self.TECHNICIAN_PATH
 
         self._call_delivery(delivery, namespace, session, {"success": True})
 
-        namespace["Hermes"].assert_called_once_with(session)
-        namespace["Hermes"].return_value.save_technician_report.assert_called_once_with()
+        self.assertEqual(namespace["input"].call_count, 2)
+        hermes.save_technician_report.assert_called_once_with()
+        hermes.save_customer_report.assert_not_called()
         namespace["log_info"].assert_called_once_with(
             session,
             "HERMES",
-            f"Technician report saved: {report_path}",
+            f"Technician report saved: {self.TECHNICIAN_PATH}",
         )
 
-    def test_existing_report_displays_error_without_crashing(self):
+    def test_customer_offered_and_accepted_after_technician_declined(self):
         delivery, namespace = self._load_delivery_function()
         session = mock.Mock()
-        namespace["input"].return_value = "y"
-        namespace["Hermes"].return_value.save_technician_report.side_effect = (
-            FileExistsError(
-                "Technician report already exists: "
-                "/tmp/recovery/reports/technician_report.md"
-            )
+        namespace["input"].side_effect = ["n", "y"]
+        hermes = namespace["Hermes"].return_value
+        hermes.save_customer_report.return_value = self.CUSTOMER_PATH
+
+        self._call_delivery(delivery, namespace, session, {"success": True})
+
+        hermes.save_technician_report.assert_not_called()
+        hermes.save_customer_report.assert_called_once_with()
+        namespace["log_info"].assert_called_once_with(
+            session,
+            "HERMES",
+            f"Customer report saved: {self.CUSTOMER_PATH}",
+        )
+
+    def test_both_accepted_saves_and_logs_both(self):
+        delivery, namespace = self._load_delivery_function()
+        session = mock.Mock()
+        namespace["input"].side_effect = ["y", "y"]
+        hermes = namespace["Hermes"].return_value
+        hermes.save_technician_report.return_value = self.TECHNICIAN_PATH
+        hermes.save_customer_report.return_value = self.CUSTOMER_PATH
+
+        self._call_delivery(delivery, namespace, session, {"success": True})
+
+        hermes.save_technician_report.assert_called_once_with()
+        hermes.save_customer_report.assert_called_once_with()
+        self.assertEqual(
+            self._log_messages(namespace),
+            [
+                f"Technician report saved: {self.TECHNICIAN_PATH}",
+                f"Customer report saved: {self.CUSTOMER_PATH}",
+            ],
+        )
+
+    def test_technician_overwrite_refusal_still_offers_customer(self):
+        delivery, namespace = self._load_delivery_function()
+        session = mock.Mock()
+        namespace["input"].side_effect = ["y", "y"]
+        hermes = namespace["Hermes"].return_value
+        hermes.save_technician_report.side_effect = FileExistsError(
+            "Technician report already exists: "
+            "/tmp/recovery/reports/technician_report.md"
+        )
+        hermes.save_customer_report.return_value = self.CUSTOMER_PATH
+
+        self._call_delivery(delivery, namespace, session, {"success": True})
+
+        # Overwrite refusal on the technician report must not abort the
+        # customer report offer.
+        namespace["print"].assert_called()
+        hermes.save_customer_report.assert_called_once_with()
+        namespace["log_info"].assert_called_once_with(
+            session,
+            "HERMES",
+            f"Customer report saved: {self.CUSTOMER_PATH}",
+        )
+
+    def test_customer_overwrite_refusal_displays_error_and_continues(self):
+        delivery, namespace = self._load_delivery_function()
+        session = mock.Mock()
+        namespace["input"].side_effect = ["n", "y"]
+        hermes = namespace["Hermes"].return_value
+        hermes.save_customer_report.side_effect = FileExistsError(
+            "Customer report already exists: "
+            "/tmp/recovery/reports/customer_report.md"
         )
 
         self._call_delivery(delivery, namespace, session, {"success": True})
 
         namespace["print"].assert_called()
         namespace["log_info"].assert_not_called()
+
+    def test_report_prompt_i18n_strings(self):
+        set_language("en", persist=False)
+        self.assertEqual(
+            tr("report.prompt.generate_customer"),
+            "Generate Customer Report? [y/N]:",
+        )
+        self.assertEqual(
+            tr("report.label.saved_path_customer", path="/x"),
+            "Customer report saved: /x",
+        )
+
+        set_language("de", persist=False)
+        self.assertEqual(
+            tr("report.prompt.generate_customer"),
+            "Kundenbericht erstellen? [j/N]:",
+        )
+        self.assertEqual(
+            tr("report.label.saved_path_customer", path="/x"),
+            "Kundenbericht gespeichert: /x",
+        )
 
 
 class FinalizeRecoveryOfferTests(unittest.TestCase):

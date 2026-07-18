@@ -244,6 +244,8 @@
 
     "report.prompt.generate": "Technikerbericht erstellen? [j/N]:",
     "report.label.saved_path": "Technikerbericht gespeichert: {path}",
+    "report.prompt.generate_customer": "Kundenbericht erstellen? [j/N]:",
+    "report.label.saved_path_customer": "Kundenbericht gespeichert: {path}",
 
     "delivery.prompt.finalize": "Wiederherstellungsarbeit abschliessen? [j/N]:",
     "delivery.label.finalized": "Wiederherstellungsarbeit abgeschlossen. Fallstatus ist jetzt COMPLETED.",

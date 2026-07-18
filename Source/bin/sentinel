@@ -1131,28 +1131,52 @@ def _run_assessment_pipeline(session, intake, devices):
     return strategy, smart_result, workflow_results
 
 
-def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None):
-    if recovery_result is None or not recovery_result["success"]:
-        return
-
-    report_confirm = input(tr("report.prompt.generate")).strip().lower()
+def _offer_report_generation(
+    session,
+    prompt_key,
+    saved_path_key,
+    save_report,
+    log_label,
+):
+    report_confirm = input(tr(prompt_key)).strip().lower()
 
     if not _confirmed_yes(report_confirm):
         return
 
     try:
-        report_path = Hermes(session).save_technician_report()
+        report_path = save_report()
     except FileExistsError as error:
         print()
         print(error)
         return
 
     print()
-    print(tr("report.label.saved_path", path=report_path))
+    print(tr(saved_path_key, path=report_path))
     log_info(
         session,
         "HERMES",
-        f"Technician report saved: {report_path}",
+        f"{log_label}: {report_path}",
+    )
+
+
+def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None):
+    if recovery_result is None or not recovery_result["success"]:
+        return
+
+    _offer_report_generation(
+        session,
+        "report.prompt.generate",
+        "report.label.saved_path",
+        lambda: Hermes(session).save_technician_report(),
+        "Technician report saved",
+    )
+
+    _offer_report_generation(
+        session,
+        "report.prompt.generate_customer",
+        "report.label.saved_path_customer",
+        lambda: Hermes(session).save_customer_report(),
+        "Customer report saved",
     )
 
 
