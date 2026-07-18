@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime
@@ -1454,3 +1455,889 @@ def execute_photorec_recovery(session):
         log_error(session, "ARCHIVE", result["message"])
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# TestDisk execution preparation (foundational; non-executing).
+#
+# These helpers implement the fail-closed prerequisite checks, the conservative
+# free-space precheck, the atomic working-copy preparation, and the
+# canonical-immutability guards specified in TestDiskIntegration.md (§3, §6, §7,
+# §7A). They deliberately do NOT: launch TestDisk or any subprocess, construct a
+# TestDisk command, create or modify host accounts, transition status, touch the
+# recovery-operations lifecycle, or read configuration. Every host interaction
+# (identity lookup, PATH probe, stat, statvfs, create/copy/fsync/rename/chown) is
+# taken through an injected provider so the checks are pure and unit-testable
+# without root. All host-specific values (recovery account name, privileged group
+# names, drop-mechanism name, execution mode) are supplied by the caller from
+# configuration; nothing here hard-codes an account, uid/gid, drop tool, or mode.
+#
+# These are ARCHIVE-internal helpers (all underscore-prefixed): they are NOT a
+# public ARCHIVE API and are consumed only inside this module (by the future
+# execute_testdisk_recovery) and by the unit tests, which import the private
+# names explicitly.
+#
+# IMPORTANT: the dicts returned here are *validation results*, not
+# recovery-operation results. They intentionally do NOT carry the operation
+# "artifacts" field used by execute_photorec_recovery / execute_forensic_image;
+# no placeholder artifact field is added merely to imitate an operation result.
+# They share only the structured shape success/status/code/message (+ optional
+# display_args and helper-specific data). status is "ok" for a passed check,
+# "refused" for a fail-closed safety refusal, "failed" for an I/O failure, and
+# "completed" for a successful preparation.
+# ---------------------------------------------------------------------------
+
+_TESTDISK_WORKING_COPY_FILENAME = "testdisk.img"
+_TESTDISK_WORKING_COPY_TMP_SUFFIX = ".tmp"
+# Conservative headroom required on the working/ filesystem in addition to a
+# full-size copy of the canonical image. Not host-specific; overridable per call.
+_TESTDISK_WORKING_COPY_SAFETY_MARGIN_BYTES = 64 * 1024 * 1024
+_TESTDISK_WORKING_COPY_MODE = 0o600
+_TESTDISK_RECOVERED_DIR_MODE = 0o700
+_TESTDISK_LOG_MODE = 0o640
+# Semantic execution modes (§7A). "external" covers "another compatible
+# privilege-separation mechanism" (alternate drop tool, an already-confined
+# runtime identity, or a container/namespace boundary) and requires a configured
+# drop mechanism; it is only structurally validated here and never invoked.
+_TESTDISK_SUPPORTED_EXECUTION_MODES = ("root", "sudo", "external")
+
+
+def _testdisk_result(success, code, message, *, status, display_args=None, **extra):
+    result = {
+        "success": success,
+        "status": status,
+        "code": code,
+        "message": message,
+    }
+    if display_args is not None:
+        result["display_args"] = display_args
+    result.update(extra)
+    return result
+
+
+def _default_identity_resolver(account_name):
+    """
+    Resolve a host account to its uid, primary gid, and full group membership.
+
+    Supplementary groups are enumerated through the host identity service via
+    os.getgrouplist(), which consults nsswitch (files, LDAP/SSSD, …) — unlike
+    grp.getgrall(), which only sees locally enumerable sources and can silently
+    under-report membership. Under-reporting here would be fail-open for the
+    device-access/privileged-group check, so getgrouplist() is required. Returned
+    gids are resolved to names for the forbidden-group comparison; the raw gids
+    are also returned. Raises KeyError if the account does not exist and OSError
+    if group enumeration fails (both fail closed at the caller).
+    """
+
+    import grp
+    import pwd
+
+    entry = pwd.getpwnam(account_name)
+    primary_gid = entry.pw_gid
+
+    group_gids = list(os.getgrouplist(account_name, primary_gid))
+
+    group_names = []
+    for gid in group_gids:
+        try:
+            group_names.append(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            # A gid with no name entry: keep the numeric gid (returned below) but
+            # it has no name to compare against forbidden group names.
+            continue
+
+    return {
+        "account": account_name,
+        "uid": entry.pw_uid,
+        "gid": primary_gid,
+        "groups": group_names,
+        "group_gids": group_gids,
+    }
+
+
+def _default_command_exists(name):
+    return shutil.which(name) is not None
+
+
+def _default_geteuid():
+    return os.geteuid()
+
+
+def _default_stat_provider(path):
+    return os.stat(path)
+
+
+def _default_statvfs_provider(path):
+    return os.statvfs(path)
+
+
+def _resolve_recovery_identity(
+    account_name,
+    *,
+    identity_resolver=_default_identity_resolver,
+):
+    """
+    Resolve the configured confined recovery identity by account name.
+
+    Returns the resolved identity (account, uid, gid, groups, group_gids) on
+    success. Fails closed when no identity is configured, the account cannot be
+    resolved, or group enumeration fails.
+    """
+
+    normalized = _normalize_identity_text(account_name)
+
+    if not normalized:
+        return _testdisk_result(
+            False,
+            "TESTDISK_IDENTITY_UNCONFIGURED",
+            "No confined recovery identity is configured.",
+            status="refused",
+        )
+
+    try:
+        identity = identity_resolver(normalized)
+    except KeyError:
+        return _testdisk_result(
+            False,
+            "TESTDISK_IDENTITY_MISSING",
+            f"Recovery identity does not exist: {normalized}",
+            status="refused",
+            display_args={"account": normalized},
+        )
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_IDENTITY_LOOKUP_FAILED",
+            f"Recovery identity lookup failed: {error}",
+            status="refused",
+            display_args={"account": normalized, "error": str(error)},
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_IDENTITY_RESOLVED",
+        f"Recovery identity resolved: {normalized}",
+        status="ok",
+        identity=identity,
+    )
+
+
+def _reject_unsafe_recovery_identity(identity, forbidden_groups):
+    """
+    Reject a recovery identity that is unsafe to run TestDisk under (§7A). An
+    identity is unsafe if it is root-equivalent (uid 0, primary gid 0, or a
+    supplementary root group) or a member of any configured privileged /
+    device-access group (e.g. disk, sudo). Distinct fail-closed codes are
+    returned per reason. Fail-closed.
+    """
+
+    if identity.get("uid") == 0:
+        return _testdisk_result(
+            False,
+            "TESTDISK_IDENTITY_ROOT_UID",
+            "Recovery identity must not be root (uid 0).",
+            status="refused",
+        )
+
+    group_gids = set(identity.get("group_gids", []))
+    if identity.get("gid") == 0 or 0 in group_gids:
+        return _testdisk_result(
+            False,
+            "TESTDISK_IDENTITY_ROOT_GID",
+            "Recovery identity must not belong to the root group (gid 0).",
+            status="refused",
+        )
+
+    identity_groups = set(identity.get("groups", []))
+    forbidden = {name for name in (forbidden_groups or []) if name}
+    intersection = sorted(identity_groups & forbidden)
+
+    if intersection:
+        return _testdisk_result(
+            False,
+            "TESTDISK_IDENTITY_PRIVILEGED_GROUP",
+            "Recovery identity belongs to a privileged/device-access group: "
+            f"{', '.join(intersection)}",
+            status="refused",
+            display_args={"groups": ", ".join(intersection)},
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_IDENTITY_SAFE",
+        "Recovery identity is non-root and has no privileged/device-access "
+        "group membership.",
+        status="ok",
+    )
+
+
+def _validate_privilege_drop_mechanism(
+    mechanism,
+    *,
+    command_exists=_default_command_exists,
+):
+    """
+    Validate that the configured privilege-drop mechanism exists on PATH.
+
+    Fail-closed when unconfigured or not found. Does not invoke the mechanism.
+    """
+
+    normalized = _normalize_identity_text(mechanism)
+
+    if not normalized:
+        return _testdisk_result(
+            False,
+            "TESTDISK_DROP_MECHANISM_UNCONFIGURED",
+            "No privilege-drop mechanism is configured.",
+            status="refused",
+        )
+
+    if not command_exists(normalized):
+        return _testdisk_result(
+            False,
+            "TESTDISK_DROP_MECHANISM_MISSING",
+            f"Privilege-drop mechanism not found on PATH: {normalized}",
+            status="refused",
+            display_args={"mechanism": normalized},
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_DROP_MECHANISM_AVAILABLE",
+        f"Privilege-drop mechanism available: {normalized}",
+        status="ok",
+        mechanism=normalized,
+    )
+
+
+def _validate_execution_mode(
+    mode,
+    *,
+    drop_mechanism=None,
+    geteuid=_default_geteuid,
+    command_exists=_default_command_exists,
+    sudo_command="sudo",
+):
+    """
+    Validate that the configured execution mode is structurally usable (§7A).
+
+    Structural only: no subprocess is run. Recognised semantic modes:
+      * "root"     — Sentinel runs as root and performs the drop directly;
+                     requires the current process to be root.
+      * "sudo"     — the drop is wrapped in sudo; requires sudo on PATH.
+      * "external" — another compatible privilege-separation mechanism
+                     (alternate drop tool, an already-confined runtime identity,
+                     or a container/namespace boundary); requires a configured
+                     drop mechanism that exists on PATH. It is only checked
+                     structurally here and is never invoked in this slice.
+    Any mode name outside this set is rejected (never silently accepted).
+    Fail-closed.
+    """
+
+    normalized = _normalize_identity_text(mode).lower()
+
+    if normalized not in _TESTDISK_SUPPORTED_EXECUTION_MODES:
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTION_MODE_INVALID",
+            f"Unsupported execution mode: {mode}",
+            status="refused",
+            display_args={"mode": str(mode)},
+        )
+
+    if normalized == "root" and geteuid() != 0:
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTION_MODE_UNUSABLE",
+            "Execution mode 'root' requires Sentinel to run as root.",
+            status="refused",
+            display_args={"mode": normalized},
+        )
+
+    if normalized == "sudo" and not command_exists(sudo_command):
+        return _testdisk_result(
+            False,
+            "TESTDISK_EXECUTION_MODE_UNUSABLE",
+            "Execution mode 'sudo' requires sudo on PATH.",
+            status="refused",
+            display_args={"mode": normalized},
+        )
+
+    if normalized == "external":
+        mechanism = _validate_privilege_drop_mechanism(
+            drop_mechanism, command_exists=command_exists
+        )
+        if not mechanism["success"]:
+            return _testdisk_result(
+                False,
+                "TESTDISK_EXECUTION_MODE_UNUSABLE",
+                "Execution mode 'external' requires a configured, available "
+                "privilege-drop mechanism.",
+                status="refused",
+                display_args={
+                    "mode": normalized,
+                    "mechanism_code": mechanism["code"],
+                },
+            )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_EXECUTION_MODE_USABLE",
+        f"Execution mode structurally usable: {normalized}",
+        status="ok",
+        mode=normalized,
+    )
+
+
+def _validate_canonical_protection(
+    canonical_image_path,
+    recovery_identity,
+    *,
+    stat_provider=_default_stat_provider,
+):
+    """
+    Validate that the canonical image is present and inaccessible to the
+    recovery identity: it must not be owned by the recovery uid/gid and must not
+    grant any group/other permission bits. Fail-closed.
+    """
+
+    path = str(canonical_image_path)
+
+    try:
+        info = stat_provider(path)
+    except FileNotFoundError:
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_MISSING",
+            f"Canonical image not found: {path}",
+            status="refused",
+            display_args={"path": path},
+        )
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_STAT_FAILED",
+            f"Canonical image could not be inspected: {error}",
+            status="refused",
+            display_args={"path": path, "error": str(error)},
+        )
+
+    if info.st_uid == recovery_identity["uid"] or (
+        info.st_gid == recovery_identity["gid"]
+    ):
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_OWNED_BY_RECOVERY",
+            "Canonical image is owned by the recovery identity.",
+            status="refused",
+            display_args={"path": path},
+        )
+
+    if info.st_mode & 0o077:
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_PERMISSIVE",
+            "Canonical image grants group/other access; must be owner-only.",
+            status="refused",
+            display_args={"path": path, "mode": oct(info.st_mode & 0o777)},
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_CANONICAL_PROTECTED",
+        "Canonical image is protected from the recovery identity.",
+        status="ok",
+    )
+
+
+def _validate_recovery_target(
+    path,
+    recovery_identity,
+    required_mode,
+    *,
+    stat_provider=_default_stat_provider,
+):
+    """
+    Validate that a working/output/log target is owned by the recovery identity
+    (uid and gid) and has exactly the required mode. Fail-closed.
+    """
+
+    target = str(path)
+
+    try:
+        info = stat_provider(target)
+    except FileNotFoundError:
+        return _testdisk_result(
+            False,
+            "TESTDISK_TARGET_MISSING",
+            f"Recovery target not found: {target}",
+            status="refused",
+            display_args={"path": target},
+        )
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_TARGET_STAT_FAILED",
+            f"Recovery target could not be inspected: {error}",
+            status="refused",
+            display_args={"path": target, "error": str(error)},
+        )
+
+    if info.st_uid != recovery_identity["uid"] or (
+        info.st_gid != recovery_identity["gid"]
+    ):
+        return _testdisk_result(
+            False,
+            "TESTDISK_TARGET_WRONG_OWNER",
+            f"Recovery target is not owned by the recovery identity: {target}",
+            status="refused",
+            display_args={"path": target},
+        )
+
+    if (info.st_mode & 0o777) != required_mode:
+        return _testdisk_result(
+            False,
+            "TESTDISK_TARGET_WRONG_MODE",
+            f"Recovery target has an unexpected mode: {target}",
+            status="refused",
+            display_args={
+                "path": target,
+                "expected_mode": oct(required_mode),
+                "actual_mode": oct(info.st_mode & 0o777),
+            },
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_TARGET_OK",
+        f"Recovery target ownership and mode verified: {target}",
+        status="ok",
+    )
+
+
+def _validate_ancestors_traversable(
+    leaf_path,
+    boundary_path,
+    *,
+    stat_provider=_default_stat_provider,
+):
+    """
+    Verify every ancestor directory of leaf_path, up to and including
+    boundary_path, grants 'others execute' (o+x) so the dropped identity can
+    traverse to an owned leaf. Fail-closed. boundary_path must be an ancestor of
+    leaf_path.
+    """
+
+    leaf = Path(leaf_path)
+    boundary = Path(boundary_path)
+
+    ancestors = []
+    found_boundary = False
+    for parent in leaf.parents:
+        ancestors.append(parent)
+        if parent == boundary:
+            found_boundary = True
+            break
+
+    if not found_boundary:
+        return _testdisk_result(
+            False,
+            "TESTDISK_TRAVERSAL_BOUNDARY_NOT_ANCESTOR",
+            f"Boundary is not an ancestor of the target: {boundary}",
+            status="refused",
+            display_args={"path": str(leaf), "boundary": str(boundary)},
+        )
+
+    non_traversable = []
+    for ancestor in ancestors:
+        try:
+            info = stat_provider(str(ancestor))
+        except OSError:
+            non_traversable.append(str(ancestor))
+            continue
+        if not (info.st_mode & 0o001):
+            non_traversable.append(str(ancestor))
+
+    if non_traversable:
+        return _testdisk_result(
+            False,
+            "TESTDISK_PARENT_NOT_TRAVERSABLE",
+            "One or more structural parents are not traversable by others: "
+            f"{', '.join(non_traversable)}",
+            status="refused",
+            display_args={"paths": ", ".join(non_traversable)},
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_TRAVERSAL_OK",
+        "All structural parents are traversable by the recovery identity.",
+        status="ok",
+    )
+
+
+def _check_working_free_space(
+    source_image_path,
+    working_dir,
+    *,
+    safety_margin_bytes=_TESTDISK_WORKING_COPY_SAFETY_MARGIN_BYTES,
+    stat_provider=_default_stat_provider,
+    statvfs_provider=_default_statvfs_provider,
+):
+    """
+    Conservative free-space precheck: require at least a full-size copy of the
+    canonical image plus an explicit non-negative safety margin available on the
+    working/ filesystem. Fail-closed on a negative margin or any undetermined
+    value.
+    """
+
+    if safety_margin_bytes < 0:
+        return _testdisk_result(
+            False,
+            "TESTDISK_FREE_SPACE_INVALID_MARGIN",
+            "Free-space safety margin must not be negative.",
+            status="refused",
+            display_args={"safety_margin_bytes": safety_margin_bytes},
+        )
+
+    source = str(source_image_path)
+
+    try:
+        source_size = stat_provider(source).st_size
+    except FileNotFoundError:
+        return _testdisk_result(
+            False,
+            "TESTDISK_SOURCE_IMAGE_MISSING",
+            f"Canonical image not found: {source}",
+            status="refused",
+            display_args={"path": source},
+        )
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_FREE_SPACE_UNDETERMINED",
+            f"Canonical image size could not be determined: {error}",
+            status="refused",
+            display_args={"path": source, "error": str(error)},
+        )
+
+    try:
+        vfs = statvfs_provider(str(working_dir))
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_FREE_SPACE_UNDETERMINED",
+            f"Working filesystem free space could not be determined: {error}",
+            status="refused",
+            display_args={"path": str(working_dir), "error": str(error)},
+        )
+
+    available_bytes = vfs.f_bavail * vfs.f_frsize
+    required_bytes = source_size + safety_margin_bytes
+
+    if available_bytes < required_bytes:
+        return _testdisk_result(
+            False,
+            "TESTDISK_INSUFFICIENT_FREE_SPACE",
+            "Insufficient free space on the working filesystem for the "
+            "working copy.",
+            status="refused",
+            display_args={
+                "required_bytes": required_bytes,
+                "available_bytes": available_bytes,
+                "source_size_bytes": source_size,
+                "safety_margin_bytes": safety_margin_bytes,
+            },
+            required_bytes=required_bytes,
+            available_bytes=available_bytes,
+        )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_FREE_SPACE_OK",
+        "Sufficient free space is available for the working copy.",
+        status="ok",
+        required_bytes=required_bytes,
+        available_bytes=available_bytes,
+    )
+
+
+class _DefaultTestdiskFsOps:
+    """
+    Default filesystem operations for working-copy preparation. Injected in
+    production; tests substitute a fake so no privileged operations run.
+    """
+
+    def exists(self, path):
+        return Path(path).exists()
+
+    def unlink(self, path):
+        Path(path).unlink()
+
+    def create_secure_file(self, path, mode):
+        # Create the empty destination exclusively with restrictive permissions
+        # BEFORE any image bytes are written, so the working copy is never
+        # briefly world-readable. O_EXCL guarantees a fresh file (the stale .tmp
+        # was already removed); fchmod overrides umask so the mode is exact.
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        try:
+            os.fchmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+
+    def copy(self, source, destination):
+        # copyfile opens the (already-created, 0600) destination for writing and
+        # truncates it; it does not alter the existing file mode.
+        shutil.copyfile(source, destination)
+
+    def size(self, path):
+        return Path(path).stat().st_size
+
+    def fsync_file(self, path):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def fsync_dir(self, path):
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def rename(self, source, destination):
+        os.replace(source, destination)
+
+    def chown(self, path, uid, gid):
+        os.chown(path, uid, gid)
+
+    def chmod(self, path, mode):
+        os.chmod(path, mode)
+
+
+def _prepare_testdisk_working_copy(
+    source_image_path,
+    working_dir,
+    *,
+    owner_uid,
+    owner_gid,
+    file_mode=_TESTDISK_WORKING_COPY_MODE,
+    fs_ops=None,
+):
+    """
+    Prepare the disposable working copy working/testdisk.img with atomic,
+    failure-safe completion (TestDiskIntegration.md §3):
+
+        remove stale .tmp -> create restricted (0600) .tmp -> copy -> verify
+        size -> fsync file -> atomic rename -> fsync directory -> chown/chmod
+
+    The temporary file is created with restrictive permissions BEFORE any image
+    bytes are written, so the working copy is never transiently world-readable.
+    The file is fsync'd BEFORE the rename; the containing directory is fsync'd
+    AFTER the rename (so the new directory entry is durable). On any failure the
+    temporary file is removed and no partial working/testdisk.img is left behind.
+    All filesystem interactions go through the injected fs_ops so tests need no
+    root and no real disk.
+    """
+
+    fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
+
+    source = Path(source_image_path)
+    working_dir = Path(working_dir)
+    final_path = working_dir / _TESTDISK_WORKING_COPY_FILENAME
+    tmp_path = final_path.with_name(
+        _TESTDISK_WORKING_COPY_FILENAME + _TESTDISK_WORKING_COPY_TMP_SUFFIX
+    )
+
+    def _cleanup(remove_final):
+        candidates = [tmp_path, final_path] if remove_final else [tmp_path]
+        for candidate in candidates:
+            try:
+                if fs.exists(str(candidate)):
+                    fs.unlink(str(candidate))
+            except OSError:
+                pass
+
+    try:
+        source_size = fs.size(str(source))
+    except OSError:
+        return _testdisk_result(
+            False,
+            "TESTDISK_SOURCE_IMAGE_MISSING",
+            f"Canonical image not found for working-copy preparation: {source}",
+            status="refused",
+            display_args={"path": str(source)},
+        )
+
+    try:
+        if fs.exists(str(tmp_path)):
+            fs.unlink(str(tmp_path))
+    except OSError as error:
+        return _testdisk_result(
+            False,
+            "TESTDISK_WORKING_COPY_STALE_TMP_CLEANUP_FAILED",
+            f"Could not remove a stale temporary working copy: {error}",
+            status="failed",
+            display_args={"path": str(tmp_path), "error": str(error)},
+        )
+
+    final_created = False
+    try:
+        try:
+            fs.create_secure_file(str(tmp_path), file_mode)
+        except OSError as error:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_CREATE_FAILED",
+                f"Restricted temporary working copy could not be created: "
+                f"{error}",
+                status="failed",
+                display_args={"path": str(tmp_path), "error": str(error)},
+            )
+
+        try:
+            fs.copy(str(source), str(tmp_path))
+        except OSError as error:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_COPY_FAILED",
+                f"Working-copy byte copy failed: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+
+        try:
+            copied_size = fs.size(str(tmp_path))
+        except OSError as error:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_VERIFY_FAILED",
+                f"Working-copy size could not be verified: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+
+        if copied_size != source_size:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_SIZE_MISMATCH",
+                "Working-copy size does not match the canonical image.",
+                status="failed",
+                display_args={
+                    "expected_bytes": source_size,
+                    "actual_bytes": copied_size,
+                },
+            )
+
+        try:
+            fs.fsync_file(str(tmp_path))
+        except OSError as error:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_FSYNC_FAILED",
+                f"Working-copy file fsync failed: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+
+        try:
+            fs.rename(str(tmp_path), str(final_path))
+            final_created = True
+        except OSError as error:
+            _cleanup(False)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_RENAME_FAILED",
+                f"Working-copy atomic rename failed: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+
+        try:
+            fs.fsync_dir(str(working_dir))
+        except OSError as error:
+            _cleanup(True)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_FSYNC_FAILED",
+                f"Working directory fsync failed: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+
+        try:
+            fs.chown(str(final_path), owner_uid, owner_gid)
+            fs.chmod(str(final_path), file_mode)
+        except OSError as error:
+            _cleanup(True)
+            return _testdisk_result(
+                False,
+                "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED",
+                f"Working-copy ownership/mode could not be applied: {error}",
+                status="failed",
+                display_args={"error": str(error)},
+            )
+    except BaseException:
+        _cleanup(final_created)
+        raise
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_WORKING_COPY_PREPARED",
+        f"Working copy prepared: {final_path}",
+        status="completed",
+        path=str(final_path),
+        size_bytes=source_size,
+    )
+
+
+def _validate_execution_target(
+    target_path,
+    *,
+    canonical_image_path,
+    source_device_path=None,
+    path_resolver=os.path.realpath,
+):
+    """
+    Canonical-immutability guard: the TestDisk execution target must be neither
+    the canonical image nor the original device. Paths are normalized through
+    path_resolver (default os.path.realpath) before comparison. Fail-closed.
+    """
+
+    target = path_resolver(str(target_path))
+    canonical = path_resolver(str(canonical_image_path))
+
+    if target == canonical:
+        return _testdisk_result(
+            False,
+            "TESTDISK_TARGET_IS_CANONICAL",
+            "Refusing to use the canonical image as the TestDisk target.",
+            status="refused",
+            display_args={"target": target},
+        )
+
+    if source_device_path:
+        device = path_resolver(str(source_device_path))
+        if target == device:
+            return _testdisk_result(
+                False,
+                "TESTDISK_TARGET_IS_ORIGINAL_DEVICE",
+                "Refusing to use the original device as the TestDisk target.",
+                status="refused",
+                display_args={"target": target},
+            )
+
+    return _testdisk_result(
+        True,
+        "TESTDISK_TARGET_SAFE",
+        "TestDisk target is neither the canonical image nor the original device.",
+        status="ok",
+        target=target,
+    )
