@@ -557,6 +557,60 @@ def _print_assessment_context(source_device, assessment, strategy):
         print(f"- {_operator_oracle_step(step)}")
 
 
+def _run_integrity_and_completion(session, assessment, intake):
+    integrity_result = verify_forensic_image(session)
+
+    print()
+    print(tr("integrity.title"))
+    print(tr("integrity.label.image"), integrity_result["image_filename"])
+    print(tr("integrity.label.algorithm"), integrity_result["algorithm"])
+
+    if integrity_result["success"]:
+        print(tr("integrity.label.result"), tr("integrity.result.recorded"))
+        print(tr("integrity.label.sha256"), integrity_result["digest"])
+        print(tr("integrity.label.saved_to"), integrity_result["evidence_path"])
+
+        update_status(
+            session,
+            RecoveryStatus.READY_FOR_RECOVERY,
+            session.source_device,
+            assessment,
+            intake=intake,
+        )
+
+        (
+            recovery_result,
+            recovery_declined,
+            recovery_selection_cancelled,
+        ) = _run_recovery_method_selection(
+            session,
+            assessment,
+            intake,
+        )
+
+        return (
+            integrity_result,
+            recovery_result,
+            recovery_declined,
+            recovery_selection_cancelled,
+        )
+
+    print(tr("integrity.label.result"), tr("integrity.result.failed"))
+    print(
+        tr("integrity.label.error"),
+        operator_message(integrity_result, "archive"),
+    )
+    update_status(
+        session,
+        RecoveryStatus.READY_FOR_IMAGING,
+        session.source_device,
+        assessment,
+        intake=intake,
+    )
+
+    return (integrity_result, None, False, False)
+
+
 def _run_acquisition_workflow(session, devices, assessment, intake):
     imaging_result = None
     integrity_result = None
@@ -649,48 +703,12 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                 "SENTINEL",
                 "Fingerprint retry approved.",
             )
-            integrity_result = verify_forensic_image(session)
-
-            print()
-            print(tr("integrity.title"))
-            print(tr("integrity.label.image"), integrity_result["image_filename"])
-            print(tr("integrity.label.algorithm"), integrity_result["algorithm"])
-
-            if integrity_result["success"]:
-                print(tr("integrity.label.result"), tr("integrity.result.recorded"))
-                print(tr("integrity.label.sha256"), integrity_result["digest"])
-                print(tr("integrity.label.saved_to"), integrity_result["evidence_path"])
-
-                update_status(
-                    session,
-                    RecoveryStatus.READY_FOR_RECOVERY,
-                    session.source_device,
-                    assessment,
-                    intake=intake,
-                )
-
-                (
-                    recovery_result,
-                    recovery_declined,
-                    recovery_selection_cancelled,
-                ) = _run_recovery_method_selection(
-                    session,
-                    assessment,
-                    intake,
-                )
-            else:
-                print(tr("integrity.label.result"), tr("integrity.result.failed"))
-                print(
-                    tr("integrity.label.error"),
-                    operator_message(integrity_result, "archive"),
-                )
-                update_status(
-                    session,
-                    RecoveryStatus.READY_FOR_IMAGING,
-                    session.source_device,
-                    assessment,
-                    intake=intake,
-                )
+            (
+                integrity_result,
+                recovery_result,
+                recovery_declined,
+                recovery_selection_cancelled,
+            ) = _run_integrity_and_completion(session, assessment, intake)
         else:
             imaging_declined = True
             log_operator(
@@ -789,72 +807,16 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                                 print(f"- {artifact}")
 
                         if imaging_result["success"]:
-                            integrity_result = verify_forensic_image(
-                                session
+                            (
+                                integrity_result,
+                                recovery_result,
+                                recovery_declined,
+                                recovery_selection_cancelled,
+                            ) = _run_integrity_and_completion(
+                                session,
+                                assessment,
+                                intake,
                             )
-
-                            print()
-                            print(tr("integrity.title"))
-                            print(
-                                tr("integrity.label.image"),
-                                integrity_result["image_filename"],
-                            )
-                            print(
-                                tr("integrity.label.algorithm"),
-                                integrity_result["algorithm"],
-                            )
-
-                            if integrity_result["success"]:
-                                print(
-                                    tr("integrity.label.result"),
-                                    tr("integrity.result.recorded"),
-                                )
-                                print(
-                                    tr("integrity.label.sha256"),
-                                    integrity_result["digest"],
-                                )
-                                print(
-                                    tr("integrity.label.saved_to"),
-                                    integrity_result["evidence_path"],
-                                )
-                            else:
-                                print(
-                                    tr("integrity.label.result"),
-                                    tr("integrity.result.failed"),
-                                )
-                                print(
-                                    tr("integrity.label.error"),
-                                    operator_message(
-                                        integrity_result,
-                                        "archive",
-                                    ),
-                                )
-
-                            if integrity_result["success"]:
-                                update_status(
-                                    session,
-                                    RecoveryStatus.READY_FOR_RECOVERY,
-                                    session.source_device,
-                                    assessment,
-                                    intake=intake,
-                                )
-                                (
-                                    recovery_result,
-                                    recovery_declined,
-                                    recovery_selection_cancelled,
-                                ) = _run_recovery_method_selection(
-                                    session,
-                                    assessment,
-                                    intake,
-                                )
-                            else:
-                                update_status(
-                                    session,
-                                    RecoveryStatus.READY_FOR_IMAGING,
-                                    session.source_device,
-                                    assessment,
-                                    intake=intake,
-                                )
                         else:
                             update_status(
                                 session,
@@ -938,67 +900,16 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
                             print(f"- {artifact}")
 
                     if imaging_result["success"]:
-                        integrity_result = verify_forensic_image(session)
-
-                        print()
-                        print(tr("integrity.title"))
-                        print(
-                            tr("integrity.label.image"),
-                            integrity_result["image_filename"],
+                        (
+                            integrity_result,
+                            recovery_result,
+                            recovery_declined,
+                            recovery_selection_cancelled,
+                        ) = _run_integrity_and_completion(
+                            session,
+                            assessment,
+                            intake,
                         )
-                        print(
-                            tr("integrity.label.algorithm"),
-                            integrity_result["algorithm"],
-                        )
-
-                        if integrity_result["success"]:
-                            print(
-                                tr("integrity.label.result"),
-                                tr("integrity.result.recorded"),
-                            )
-                            print(
-                                tr("integrity.label.sha256"),
-                                integrity_result["digest"],
-                            )
-                            print(
-                                tr("integrity.label.saved_to"),
-                                integrity_result["evidence_path"],
-                            )
-                        else:
-                            print(
-                                tr("integrity.label.result"),
-                                tr("integrity.result.failed"),
-                            )
-                            print(
-                                tr("integrity.label.error"),
-                                operator_message(integrity_result, "archive"),
-                            )
-
-                        if integrity_result["success"]:
-                            update_status(
-                                session,
-                                RecoveryStatus.READY_FOR_RECOVERY,
-                                session.source_device,
-                                assessment,
-                                intake=intake,
-                            )
-                            (
-                                recovery_result,
-                                recovery_declined,
-                                recovery_selection_cancelled,
-                            ) = _run_recovery_method_selection(
-                                session,
-                                assessment,
-                                intake,
-                            )
-                        else:
-                            update_status(
-                                session,
-                                RecoveryStatus.READY_FOR_IMAGING,
-                                session.source_device,
-                                assessment,
-                                intake=intake,
-                            )
                     else:
                         update_status(
                             session,

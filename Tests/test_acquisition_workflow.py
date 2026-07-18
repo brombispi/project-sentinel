@@ -147,6 +147,12 @@ class _AcquisitionWorkflowCase(unittest.TestCase):
             ),
         }
 
+        # The workflow now delegates the integrity/completion sequence to
+        # _run_integrity_and_completion. Load the REAL helper into the same
+        # shared namespace so it resolves the already-injected collaborators;
+        # this keeps every assertion below unchanged.
+        _load_sentinel_function("_run_integrity_and_completion", namespace)
+
         workflow = _load_sentinel_function(
             "_run_acquisition_workflow", namespace
         )
