@@ -1,5 +1,7 @@
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -75,14 +77,57 @@ class SessionRegistry:
 
         return registry
 
+    @contextmanager
+    def _exclusive_lock(self):
+        """
+        Hold an exclusive advisory lock for the duration of a registry
+        read-modify-write, so two Sentinel processes cannot allocate the
+        same case number or corrupt the registry.
+
+        Uses a dedicated sibling lock file and fcntl.flock(LOCK_EX). The
+        acquisition blocks in the kernel (no busy-loop) until the lock is
+        free. The kernel releases the lock automatically when this file
+        descriptor is closed or the holding process exits, so there is no
+        on-disk lock state that can become stale.
+        """
+
+        lock_path = self.registry_path.with_name(
+            f"{self.registry_path.name}.lock"
+        )
+
+        try:
+            self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = open(lock_path, "a", encoding="utf-8")
+        except OSError as error:
+            raise SessionRegistryError(
+                f"session registry lock could not be created: {lock_path}"
+            ) from error
+
+        try:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            except OSError as error:
+                raise SessionRegistryError(
+                    f"session registry lock could not be acquired: {lock_path}"
+                ) from error
+
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            lock_file.close()
+
     def next_session_id(self):
-        registry = self.load()
+        with self._exclusive_lock():
+            registry = self.load()
 
-        year = registry["year"]
-        number = registry["last_number"] + 1
+            year = registry["year"]
+            number = registry["last_number"] + 1
 
-        registry["last_number"] = number
-        self.save(registry)
+            registry["last_number"] = number
+            self.save(registry)
 
         return f"REC-{year}-{number:06d}"
 
