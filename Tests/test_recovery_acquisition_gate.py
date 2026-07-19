@@ -147,6 +147,39 @@ class PhotoRecAcquisitionGateTests(unittest.TestCase):
 
     @mock.patch("modules.archive.shutil.which", return_value="/usr/bin/photorec")
     @mock.patch("modules.archive.subprocess.run")
+    def test_inconsistent_artifacts_refuses_photorec(self, run_mock, which_mock):
+        _make_case(self.tmp, image=True)
+
+        result = execute_photorec_recovery(self.session)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["code"], "PHOTOREC_REFUSED_ACQUISITION_INCOMPLETE")
+        self.assertEqual(
+            result["display_args"],
+            {"state": "inconsistent_artifacts"},
+        )
+        run_mock.assert_not_called()
+
+    @mock.patch("modules.archive.shutil.which", return_value="/usr/bin/photorec")
+    @mock.patch("modules.archive.subprocess.run")
+    def test_invalid_map_refuses_photorec(self, run_mock, which_mock):
+        _make_case(self.tmp, image=True, mapfile=True)
+        with mock.patch.object(
+            archive,
+            "classify_ddrescue_map_status",
+            return_value=_map_status("unreadable"),
+        ):
+            result = execute_photorec_recovery(self.session)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["code"], "PHOTOREC_REFUSED_ACQUISITION_INCOMPLETE")
+        self.assertEqual(result["display_args"], {"state": "invalid_map"})
+        run_mock.assert_not_called()
+
+    @mock.patch("modules.archive.shutil.which", return_value="/usr/bin/photorec")
+    @mock.patch("modules.archive.subprocess.run")
     def test_completed_canonical_reaches_existing_execution_path(
         self,
         run_mock,
@@ -175,12 +208,12 @@ class PhotoRecAcquisitionGateTests(unittest.TestCase):
 
 
 class TestDiskAcquisitionGateTests(unittest.TestCase):
-    def _prepare(self, tmp, fs):
+    def _prepare(self, tmp, fs, *, identity_resolver=None):
         session = SimpleNamespace(recovery_path=tmp, source_device=None)
         return prepare_testdisk_execution(
             session,
             _valid_testdisk_config(),
-            identity_resolver=_identity(),
+            identity_resolver=identity_resolver or _identity(),
             command_resolver=fs.resolver(),
             geteuid=lambda: 0,
             stat_provider=fs.stat,
@@ -189,6 +222,12 @@ class TestDiskAcquisitionGateTests(unittest.TestCase):
             source_environ={"TERM": "xterm-256color"},
             fs_ops=fs,
         )
+
+    def _assert_testdisk_gate_refusal(self, result, *, state):
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["code"], "TESTDISK_REFUSED_ACQUISITION_INCOMPLETE")
+        self.assertEqual(result["display_args"], {"state": state})
 
     def test_missing_image_refuses_testdisk_preparation(self):
         fs = FakeExecFs()
@@ -231,6 +270,42 @@ class TestDiskAcquisitionGateTests(unittest.TestCase):
             result["display_args"],
             {"state": "imaging_complete_fingerprint_missing"},
         )
+
+    def test_inconsistent_artifacts_refuses_testdisk_preparation(self):
+        fs = FakeExecFs()
+        identity_resolver = mock.Mock(
+            side_effect=AssertionError(
+                "TestDisk preparation must not continue beyond acquisition gate"
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_case(tmp, mapfile=True)
+            result = self._prepare(tmp, fs, identity_resolver=identity_resolver)
+
+        self._assert_testdisk_gate_refusal(
+            result,
+            state="inconsistent_artifacts",
+        )
+        identity_resolver.assert_not_called()
+
+    def test_invalid_map_refuses_testdisk_preparation(self):
+        fs = FakeExecFs()
+        identity_resolver = mock.Mock(
+            side_effect=AssertionError(
+                "TestDisk preparation must not continue beyond acquisition gate"
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _make_case(tmp, image=True, mapfile=True)
+            with mock.patch.object(
+                archive,
+                "classify_ddrescue_map_status",
+                return_value=_map_status("unreadable"),
+            ):
+                result = self._prepare(tmp, fs, identity_resolver=identity_resolver)
+
+        self._assert_testdisk_gate_refusal(result, state="invalid_map")
+        identity_resolver.assert_not_called()
 
     def test_completed_canonical_allows_testdisk_preparation(self):
         import test_testdisk_execution as exec_tests
