@@ -4,6 +4,31 @@ from core.assessment import Assessment
 from core.codex import Codex
 
 
+def _rule_protect_recovery_engine(device: Device):
+    """SL-001: never permit operations targeting the Recovery Engine."""
+
+    if not device.is_protected():
+        return None
+
+    return Decision(
+        status="STOP",
+        reason="Target is the Recovery Engine.",
+        evidence=f"Selected device: {device.path}",
+        law="SL-001",
+        risk="CRITICAL",
+        confidence=100,
+        recommendation="Select an external customer storage device."
+    )
+
+
+# Ordered list of safety rules. Each rule returns a blocking Decision when its
+# law is violated, or None when it has nothing to say. Future Sentinel Laws
+# plug in here without changing the aggregation logic below.
+RULES = [
+    _rule_protect_recovery_engine,
+]
+
+
 def evaluate(device: Device):
 
     codex = Codex()
@@ -34,17 +59,12 @@ def evaluate(device: Device):
                 f"{key.upper()}: {knowledge['risk']}"
             )
 
-    if device.is_protected():
+    for rule in RULES:
 
-        decision = Decision(
-            status="STOP",
-            reason="Target is the Recovery Engine.",
-            evidence=f"Selected device: {device.path}",
-            law="SL-001",
-            risk="CRITICAL",
-            confidence=100,
-            recommendation="Select an external customer storage device."
-        )
+        decision = rule(device)
+
+        if decision is None:
+            continue
 
         return Assessment(
             device=device,
@@ -52,7 +72,7 @@ def evaluate(device: Device):
             information=information,
             warnings=warnings,
             recommendations=[
-                "Select an external customer storage device."
+                decision.recommendation
             ] + recommendations
         )
 
