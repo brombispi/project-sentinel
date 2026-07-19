@@ -1234,6 +1234,26 @@ def _run_assessment_pipeline(session, intake, devices):
         "recovery_selection_cancelled": False,
     }
 
+    def _selected_device_audit_event(role, device):
+        # Machine-readable record of an explicit operator device selection.
+        # Values are read verbatim from the selected Device object; no extra
+        # storage queries. Only absent values (None / empty / whitespace-only)
+        # collapse to the stable NOT_RECORDED sentinel. Meaningful reported
+        # tokens such as "Unknown", "N/A" or "0B" are preserved verbatim.
+        def _audit_field(value):
+            if value is None:
+                return "NOT_RECORDED"
+            text = str(value).strip()
+            return text if text else "NOT_RECORDED"
+
+        return (
+            f"Device selected: role={role} | "
+            f"path={_audit_field(device.path)} | "
+            f"model={_audit_field(device.model)} | "
+            f"serial={_audit_field(device.serial)} | "
+            f"size={_audit_field(device.size)}"
+        )
+
     if session.source_device is None:
         print_device_selection_list(
             tr("device.source.title"),
@@ -1241,6 +1261,11 @@ def _run_assessment_pipeline(session, intake, devices):
         )
         source_device = select_source_device(devices)
         session.source_device = source_device
+        log_operator(
+            session,
+            "SENTINEL",
+            _selected_device_audit_event("SOURCE", session.source_device),
+        )
         assessment = evaluate(session.source_device)
         session.assessment = assessment
 
@@ -1355,6 +1380,14 @@ def _run_assessment_pipeline(session, intake, devices):
 
         session.destination_device = select_destination_device(
             destination_candidates
+        )
+        log_operator(
+            session,
+            "SENTINEL",
+            _selected_device_audit_event(
+                "DESTINATION",
+                session.destination_device,
+            ),
         )
 
     destination_assessment = evaluate_destination(session.destination_device)
