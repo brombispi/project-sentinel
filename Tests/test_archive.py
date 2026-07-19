@@ -2,6 +2,10 @@ import json
 import sys
 import tempfile
 import unittest
+import hashlib
+import io
+import builtins
+from contextlib import redirect_stdout
 from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
@@ -13,13 +17,16 @@ import shutil
 from modules.archive import (
     ACQUISITION_SOURCE_FILENAME,
     AcquisitionSourceError,
+    CHUNK_SIZE,
     FingerprintEvidenceError,
     SHA256_FILENAME,
+    _compute_sha256_digest,
     create_recovery_folder,
     read_acquisition_source,
     read_fingerprint_evidence,
     summarize_recovered_artifacts,
 )
+from i18n import set_language
 
 VALID_ACQUISITION_SOURCE = {
     "serial": "S4EWNF0M803123A",
@@ -407,6 +414,99 @@ class SummarizeRecoveredArtifactsDisjointRootTests(unittest.TestCase):
             self.assertEqual(result["recovered_file_count"], 1)
             self.assertEqual(result["recovered_size_bytes"], 3)
             self.assertEqual(result["recovered_directory_count"], 1)
+
+
+class _FailOnSecondRead:
+    def __init__(self, real_file):
+        self._f = real_file
+        self._reads = 0
+
+    def read(self, n=-1):
+        self._reads += 1
+        if self._reads > 1:
+            raise OSError(5, "Input/output error")
+        return self._f.read(n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self._f.close()
+
+
+class ComputeSha256DigestTests(unittest.TestCase):
+    def setUp(self):
+        set_language("en", persist=False)
+
+    def _run_digest(self, file_path, image_size):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            digest = _compute_sha256_digest(file_path, image_size)
+        return digest, stdout.getvalue()
+
+    def test_non_empty_success_progress_output_and_digest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "source.img"
+            data = b"x" * (CHUNK_SIZE + 123)
+            image_path.write_bytes(data)
+
+            digest, output = self._run_digest(image_path, len(data))
+
+            self.assertEqual(digest, hashlib.sha256(data).hexdigest())
+            self.assertIn("\rFingerprinting:", output)
+            self.assertTrue(output.endswith("\n"))
+            self.assertEqual(output.count("\n"), 1)
+            self.assertIn("\rFingerprinting: 100%", output)
+
+    def test_zero_byte_success_progress_output_and_digest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "source.img"
+            image_path.write_bytes(b"")
+
+            digest, output = self._run_digest(image_path, 0)
+
+            self.assertEqual(digest, hashlib.sha256(b"").hexdigest())
+            self.assertEqual(output, "\rFingerprinting: 100%\n")
+
+    def test_failure_after_progress_prints_newline_and_reraises_oserror(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "source.img"
+            data = b"x" * (CHUNK_SIZE + 100)
+            image_path.write_bytes(data)
+            real_open = builtins.open
+
+            def selective_open(path, mode="r", *args, **kwargs):
+                if str(path) == str(image_path) and "b" in mode:
+                    return _FailOnSecondRead(
+                        real_open(path, mode, *args, **kwargs)
+                    )
+                return real_open(path, mode, *args, **kwargs)
+
+            builtins.open = selective_open
+            stdout = io.StringIO()
+            try:
+                with redirect_stdout(stdout):
+                    with self.assertRaises(OSError) as context:
+                        _compute_sha256_digest(image_path, len(data))
+            finally:
+                builtins.open = real_open
+
+            output = stdout.getvalue()
+            self.assertEqual(context.exception.errno, 5)
+            self.assertIn("\rFingerprinting:", output)
+            self.assertTrue(output.endswith("\n"))
+            self.assertEqual(output.count("\n"), 1)
+
+    def test_failure_before_progress_produces_no_output(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.img"
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                with self.assertRaises(OSError):
+                    _compute_sha256_digest(missing_path, 100)
+
+            self.assertEqual(stdout.getvalue(), "")
 
 
 if __name__ == "__main__":

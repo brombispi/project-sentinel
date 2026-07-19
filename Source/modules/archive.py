@@ -1060,7 +1060,8 @@ def _compute_sha256_digest(file_path, image_size):
         with open(file_path, "rb") as image_file:
             if image_size == 0:
                 print(
-                    tr("imaging.fingerprint.progress", percent=100),
+                    "\r"
+                    + tr("imaging.fingerprint.progress", percent=100),
                     end="",
                     flush=True,
                 )
