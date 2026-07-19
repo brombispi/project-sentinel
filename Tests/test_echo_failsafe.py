@@ -30,16 +30,16 @@ class SuccessfulLoggingTests(unittest.TestCase):
             session = _FakeSession(temp_dir)
 
             with mock.patch.object(echo, "datetime") as fake_datetime:
-                fake_datetime.now.return_value.strftime.return_value = (
-                    "2026-07-18 08:47:00"
+                fake_datetime.now.return_value.isoformat.return_value = (
+                    "2026-07-18T08:47:00+00:00"
                 )
                 log_event(session, "ARCHIVE", "INFO", "Forensic imaging completed.")
                 log_event(session, "SENTINEL", "OPERATOR", "Recovery approved.")
 
             log_path = Path(temp_dir) / "audit.log"
             expected = (
-                "2026-07-18 08:47:00 [ARCHIVE][INFO] Forensic imaging completed.\n"
-                "2026-07-18 08:47:00 [SENTINEL][OPERATOR] Recovery approved.\n"
+                "2026-07-18T08:47:00+00:00 [ARCHIVE][INFO] Forensic imaging completed.\n"
+                "2026-07-18T08:47:00+00:00 [SENTINEL][OPERATOR] Recovery approved.\n"
             )
             self.assertEqual(log_path.read_bytes(), expected.encode("utf-8"))
 

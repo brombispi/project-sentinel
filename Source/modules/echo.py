@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -88,7 +88,10 @@ def log_event(session, module, level, event):
     """
 
     log_path = Path(session.recovery_path) / "audit.log"
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Timezone-aware UTC, ISO 8601, second precision, explicit +00:00 offset
+    # (e.g. "2026-07-19T15:47:05+00:00"). The timestamp is unambiguous and
+    # sortable; the line structure after it is unchanged.
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     line = f"{timestamp} [{module}][{level}] {event}\n"
 
     try:
