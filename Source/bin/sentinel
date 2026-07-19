@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,8 @@ from modules.archive import (
     create_session,
     execute_forensic_image,
     execute_photorec_recovery,
+    execute_testdisk_recovery,
+    prepare_testdisk_execution,
     relocate_recovery_case,
     unmount_source_descendants,
     validate_source_identity_for_resume,
@@ -75,6 +78,7 @@ from i18n import (
     get_language,
     init_language,
     operator_message,
+    read_testdisk_config,
     set_language,
     tr,
 )
@@ -376,9 +380,10 @@ def _run_recovery_method_selection(session, assessment, intake):
     print(tr("recovery.option.photorec"))
     print(tr("recovery.option.desc"))
     print()
-    print(tr("recovery.option.cancel"))
+    print(tr("recovery.option.testdisk"))
+    print(tr("recovery.option.testdisk_desc"))
     print()
-    print(tr("recovery.note.testdisk"))
+    print(tr("recovery.option.cancel"))
     print()
 
     recovery_method_choice = None
@@ -387,6 +392,8 @@ def _run_recovery_method_selection(session, assessment, intake):
         if choice == "1":
             recovery_method_choice = "photorec"
         elif choice == "2":
+            recovery_method_choice = "testdisk"
+        elif choice == "3":
             recovery_method_choice = "cancel"
         else:
             print(tr("validation.invalid_selection"))
@@ -512,12 +519,197 @@ def _run_recovery_method_selection(session, assessment, intake):
         )
         return None, True, False
 
+    if recovery_method_choice == "testdisk":
+        return _run_testdisk_recovery(session, assessment, intake)
+
     log_operator(
         session,
         "SENTINEL",
         "Recovery method selection cancelled.",
     )
     return None, False, True
+
+
+def _testdisk_declined(session):
+    log_operator(
+        session,
+        "SENTINEL",
+        "TestDisk recovery declined.",
+    )
+    return None, True, False
+
+
+def _run_testdisk_recovery(session, assessment, intake):
+    """
+    Root-mode TestDisk recovery wiring.
+
+    All configuration, rerun/path confirmations, and the fail-closed
+    prepare_testdisk_execution() call complete BEFORE any recovery-operation
+    lifecycle mutation. Any configuration, confirmation, or preparation failure
+    returns before append_running_recovery_operation / RECOVERING, leaving the
+    session status and session.recovery_operations untouched and launching
+    nothing. Returns the same (result, declined, cancelled) tuple shape as the
+    PhotoRec branch.
+    """
+
+    log_operator(
+        session,
+        "SENTINEL",
+        "Recovery method selected: TestDisk.",
+    )
+
+    config_result = read_testdisk_config(PROJECT_ROOT)
+    if config_result is None:
+        print()
+        print(tr("testdisk.error.not_configured"))
+        log_error(session, "ARCHIVE", "TestDisk is not configured.")
+        return None, True, False
+    if not config_result.get("success"):
+        print()
+        print(operator_message(config_result, "archive"))
+        log_error(
+            session,
+            "ARCHIVE",
+            f"TestDisk configuration invalid: "
+            f"{config_result.get('message', '')}",
+        )
+        return None, True, False
+    config = config_result["config"]
+
+    recovery_path = Path(session.recovery_path)
+    canonical_image = recovery_path / "images" / "source.img"
+    working_image = recovery_path / "working" / "testdisk.img"
+    recovered_testdisk = recovery_path / "recovered" / "testdisk"
+    log_path = recovery_path / "evidence" / "testdisk.log"
+
+    if working_image.exists():
+        print()
+        print(tr("testdisk.confirm.working_exists", path=str(working_image)))
+        if not _confirmed_yes(input(tr("testdisk.prompt.replace_working"))):
+            return _testdisk_declined(session)
+
+    try:
+        with os.scandir(recovered_testdisk) as entries:
+            recovered_nonempty = any(True for _ in entries)
+    except (FileNotFoundError, NotADirectoryError):
+        recovered_nonempty = False
+    except OSError as error:
+        print()
+        print(tr("testdisk.error.output_check_failed", error=str(error)))
+        log_error(
+            session,
+            "ARCHIVE",
+            f"TestDisk output directory check failed: {error}",
+        )
+        return None, True, False
+
+    if recovered_nonempty:
+        print()
+        print(tr("testdisk.confirm.output_exists", path=str(recovered_testdisk)))
+        if not _confirmed_yes(input(tr("testdisk.prompt.reuse_output"))):
+            return _testdisk_declined(session)
+
+    try:
+        os.lstat(str(log_path))
+        log_exists = True
+    except FileNotFoundError:
+        log_exists = False
+    except OSError as error:
+        print()
+        print(tr("testdisk.error.log_check_failed", error=str(error)))
+        log_error(session, "ARCHIVE", f"TestDisk log check failed: {error}")
+        return None, True, False
+
+    if log_exists:
+        print()
+        print(tr("testdisk.confirm.log_exists", path=str(log_path)))
+        if not _confirmed_yes(input(tr("testdisk.prompt.reuse_log"))):
+            return _testdisk_declined(session)
+
+    print()
+    print("=" * 42)
+    print(tr("testdisk.recovery.title"))
+    print("=" * 42)
+    print()
+    print(tr("testdisk.recovery.operation"))
+    print(tr("testdisk.recovery.source_image", image_path=str(canonical_image)))
+    print(tr("testdisk.recovery.working_image", working_path=str(working_image)))
+    print(tr("testdisk.recovery.output", output_path=str(recovered_testdisk)))
+    print(tr("testdisk.recovery.log", log_path=str(log_path)))
+    print(tr("testdisk.recovery.mode", mode=config["execution_mode"]))
+    print(tr("testdisk.recovery.account", account=config["recovery_account"]))
+    print()
+
+    if not _confirmed_yes(input(tr("testdisk.prompt.proceed"))):
+        return _testdisk_declined(session)
+
+    preparation = prepare_testdisk_execution(session, config)
+    if not preparation["success"]:
+        print()
+        print(operator_message(preparation, "archive"))
+        log_error(session, "ARCHIVE", preparation["message"])
+        return None, True, False
+
+    append_running_recovery_operation(
+        session,
+        RecoveryOperationType.TESTDISK.value,
+    )
+    update_status(
+        session,
+        RecoveryStatus.RECOVERING,
+        session.source_device,
+        assessment,
+        intake=intake,
+    )
+
+    log_info(
+        session,
+        "ARCHIVE",
+        f"TestDisk session started: {preparation['working_image_path']}",
+    )
+
+    recovery_result = execute_testdisk_recovery(preparation)
+
+    if recovery_result["success"]:
+        log_info(session, "ARCHIVE", recovery_result["message"])
+    else:
+        log_error(session, "ARCHIVE", recovery_result["message"])
+
+    complete_recovery_operation(
+        session,
+        success=recovery_result["success"],
+    )
+    update_status(
+        session,
+        RecoveryStatus.READY_FOR_RECOVERY,
+        session.source_device,
+        assessment,
+        intake=intake,
+    )
+
+    testdisk_session = (
+        tr("recovery.result.ended_normally")
+        if recovery_result["success"]
+        else tr("recovery.result.failed")
+    )
+
+    print()
+    print(tr("recovery.result.title"))
+    print(tr("recovery.result.testdisk_session"), testdisk_session)
+    print(
+        tr("recovery.result.recovered_directories"),
+        recovery_result["recovered_directory_count"],
+    )
+    print(
+        tr("recovery.result.recovered_files"),
+        recovery_result["recovered_file_count"],
+    )
+    print(
+        tr("recovery.result.recovered_size"),
+        format_bytes(recovery_result["recovered_total_bytes"]),
+    )
+    print(tr("recovery.result.case_status"), session.status)
+    return recovery_result, False, False
 
 
 def _print_assessment_context(source_device, assessment, strategy):

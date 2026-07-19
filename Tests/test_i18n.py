@@ -199,21 +199,20 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn("READY_FOR_IMAGING", rendered)
         self.assertNotIn("BEREIT", rendered)
 
-    def test_testdisk_option_has_no_menu_number_prefix_yet(self):
-        # The TestDisk operation identity string is intentionally staged WITHOUT
-        # a "[n]" menu-number prefix, unlike recovery.option.photorec
-        # ("[1] PhotoRec"). The recovery menu is not wired in this foundational
-        # slice; the number prefix and menu ordering will be reconciled during
-        # UI wiring (TestDiskIntegration.md §8.3). This test locks the
-        # intentional, temporary asymmetry so it stays a conscious choice rather
-        # than an accidental omission.
+    def test_testdisk_option_has_menu_number_prefix(self):
+        # The recovery menu is now wired (TestDiskIntegration.md §8.3): TestDisk
+        # is offered as option [2], PhotoRec as [1], and Cancel as [3]. The
+        # previously intentional asymmetry (recovery.option.testdisk without a
+        # "[n]" prefix) has been reconciled; this test locks the wired ordering.
         set_language("en", persist=False)
-        self.assertEqual(tr("recovery.option.testdisk"), "TestDisk")
-        self.assertFalse(tr("recovery.option.testdisk").startswith("["))
+        self.assertEqual(tr("recovery.option.testdisk"), "[2] TestDisk")
+        self.assertEqual(tr("recovery.option.cancel"), "[3] Cancel")
+        self.assertEqual(tr("recovery.prompt.select"), "Select operation [1-3]:")
 
         set_language("de", persist=False)
-        self.assertEqual(tr("recovery.option.testdisk"), "TestDisk")
-        self.assertFalse(tr("recovery.option.testdisk").startswith("["))
+        self.assertEqual(tr("recovery.option.testdisk"), "[2] TestDisk")
+        self.assertTrue(tr("recovery.option.cancel").startswith("[3]"))
+        self.assertTrue(tr("recovery.prompt.select").startswith("Vorgang"))
 
     def test_report_keys_present_and_parity(self):
         en = json.loads((I18N_DIR / "en.json").read_text(encoding="utf-8"))

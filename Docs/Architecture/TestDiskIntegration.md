@@ -51,9 +51,10 @@ TestDisk**. `RecoveryOperationStandard.md` already names it in the lifecycle,
 approval, status, artifact, and comparison tables; `ImagingSafety.md` already
 carves out its working-copy rule; `Backlog.md` already fixes its paths and
 launch command; `recovery_tools.py` already registers it; and the SENTINEL
-recovery menu already prints a "TestDisk planned" note. TestDisk integration is
-therefore an **additive extension of an anticipated slot**, not a new
-architectural pattern.
+recovery menu originally printed a "TestDisk planned" note (now replaced by a
+real, wired menu option — see *Implemented production wiring (recovery menu)*
+below). TestDisk integration is therefore an **additive extension of an
+anticipated slot**, not a new architectural pattern.
 
 ---
 
@@ -595,15 +596,140 @@ The first executable slice supports **`execution_mode == "root"` only**:
   transition, appends no `recovery_operations` record, and persists nothing;
   `execute_testdisk_recovery(...)` only runs the prepared argv with the prepared
   minimal environment and summarizes `recovered/testdisk/`.
-- **SENTINEL remains responsible for replace-confirmation.** ARCHIVE overwrites
-  an existing `working/testdisk.img` when preparing the working copy; the
-  future lifecycle/menu layer owns the decision to confirm before replacing an
-  existing working copy. Repeated preparation with valid pre-existing output/log
-  targets is idempotent (the targets are accepted, not recreated).
-- **These launch-hardening protections are implemented but still inert:** no
-  production path calls `prepare_testdisk_execution` or
-  `execute_testdisk_recovery` yet — they become live only with the future
-  lifecycle/menu wiring.
+- **SENTINEL owns replace-confirmation.** ARCHIVE overwrites an existing
+  `working/testdisk.img` when preparing the working copy; SENTINEL obtains
+  explicit operator confirmation before preparation runs (see *Implemented
+  production wiring (recovery menu)* below). Repeated preparation with valid
+  pre-existing output/log targets is idempotent (the targets are accepted, not
+  recreated).
+- **These launch-hardening protections are now reached in production.** The
+  recovery-method menu calls `prepare_testdisk_execution` and, only on success,
+  `execute_testdisk_recovery`; see the next section for the exact ordering and
+  fail-closed guarantees.
+
+---
+
+### Implemented production wiring (recovery menu)
+
+TestDisk is now **production-reachable**. It is offered in
+`_run_recovery_method_selection(...)` (`Source/bin/sentinel`) as menu option
+**`[2] TestDisk`** (with `[1] PhotoRec` and `[3] Cancel`). Both the normal
+recovery flow (`_run_integrity_and_completion` after imaging + fingerprinting)
+and the `READY_FOR_RECOVERY` resume flow reach the **same**
+`_run_recovery_method_selection`, which delegates option `[2]` to the same
+`_run_testdisk_recovery(...)` wiring. PhotoRec (option `[1]`) is unchanged.
+
+**Menu rendering is side-effect-free.** Printing the menu and reading the
+selection performs no configuration read, no preparation, no filesystem
+mutation, no lifecycle mutation, and no launch. Configuration loading, all
+confirmations, and preparation happen only inside `_run_testdisk_recovery(...)`
+after `[2]` is chosen. Module import likewise cannot launch TestDisk.
+
+**Everything precedes lifecycle mutation.** In order, the TestDisk branch:
+
+1. logs the operator selection (ECHO);
+2. reads configuration via `read_testdisk_config(PROJECT_ROOT)`;
+3. performs rerun/existing-target confirmations;
+4. asks the final `[y/N]` proceed confirmation (default **No**);
+5. calls `prepare_testdisk_execution(session, config["config"])`.
+
+Only if preparation returns success does it then, in this exact order:
+
+```
+prepare_testdisk_execution           (must succeed first)
+  → append_running_recovery_operation (RUNNING TestDisk record)
+  → update_status(RECOVERING)
+  → log "TestDisk session started" (ECHO, after RECOVERING)
+  → execute_testdisk_recovery(preparation)
+  → log result (ECHO)
+  → complete_recovery_operation(success=...)  → COMPLETED or FAILED
+  → update_status(READY_FOR_RECOVERY)
+  → display result summary
+```
+
+**Fail-closed pre-lifecycle invariant.** Each of the following returns *before*
+`append_running_recovery_operation`, the `RECOVERING` transition, and
+`execute_testdisk_recovery`, leaving **case status unchanged**,
+**`recovery_operations` unchanged**, and **no TestDisk process launched**:
+
+- TestDisk not configured (`read_testdisk_config` returns `None`);
+- invalid TestDisk configuration (structured failure result, shown via
+  `operator_message(result, "archive")`);
+- declined working-image replacement, output reuse, log continuation, or the
+  final proceed confirmation;
+- a filesystem inspection error while checking existing targets (fail-closed);
+- `TESTDISK_REQUIRES_ROOT` (root mode selected while `geteuid() != 0`);
+- any other `prepare_testdisk_execution` failure.
+
+The menu option is **not** hidden based on `geteuid()`: the unprivileged case is
+surfaced honestly as a preparation failure (`TESTDISK_REQUIRES_ROOT`) that aborts
+before operation creation.
+
+**Execution modes.** Root mode is the only executable mode. `sudo` and
+`external` remain valid *configuration* values but are configured-before-
+execution and fail closed at runtime as not-executable-yet
+(`TESTDISK_EXECUTION_MODE_SUDO_NOT_EXECUTABLE_YET`,
+`TESTDISK_EXECUTION_MODE_EXTERNAL_NOT_EXECUTABLE_YET`); no `sudo` and no
+privileged helper are implemented.
+
+**Existing-target policy (no destructive automation).** All checks and
+confirmations occur before preparation, against the real case paths:
+
+- **`working/testdisk.img`** — if it exists, SENTINEL warns and requires explicit
+  `_confirmed_yes(...)` replacement confirmation; declining aborts pre-lifecycle.
+  SENTINEL does not delete it; preparation performs the atomic replacement.
+- **`working/testdisk.img.tmp`** — a stale temporary is **preparation-owned** and
+  may be cleaned automatically without operator confirmation.
+- **`recovered/testdisk/`** — if it exists and is non-empty, existing artifacts
+  are **preserved**; SENTINEL warns that TestDisk will continue using the same
+  directory and requires explicit confirmation; declining aborts pre-lifecycle.
+  An empty directory needs no extra confirmation.
+- **`evidence/testdisk.log`** — if it exists, it is **preserved**; SENTINEL warns
+  that TestDisk 7.1's exact `/log` append/truncate behavior has **not yet been
+  reference-host validated** and requires explicit confirmation; declining aborts
+  pre-lifecycle.
+
+No automatic clearing, truncation, deletion, rotation, moving, or renaming of
+previous recovered output or the log is implemented anywhere in this slice.
+
+**Outcome mapping.** Normal exit maps the operation to **COMPLETED**; a non-zero
+exit and a structured launch failure (`TESTDISK_LAUNCH_FAILED`) both map it to
+**FAILED**. In all three cases the case returns to **`READY_FOR_RECOVERY`** — only
+the operation result and the displayed summary differ. The displayed case status
+is printed only after the `READY_FOR_RECOVERY` transition has been applied.
+
+**ECHO logging ownership.** Because `execute_testdisk_recovery(...)` is
+**session-free** (it receives only the preparation result), the execution
+start/result ECHO logging is owned by `Source/bin/sentinel`: the "TestDisk
+session started" line is logged **after** the `RECOVERING` transition, and the
+result is logged with `log_info`/`log_error` according to success.
+
+**No schema change.** This slice reuses the existing lifecycle helpers
+(`append_running_recovery_operation`, `complete_recovery_operation`,
+`update_status`) unchanged. Neither the persistence schema nor the
+recovery-operation schema was modified, and PhotoRec behavior is unchanged.
+
+### Outstanding before MiniBerry / reference-host execution
+
+No MiniBerry / reference-host validation has occurred yet. The following remain
+outstanding before running TestDisk against real evidence on the reference host:
+
+- **fd-based canonical-image opening:** open `images/source.img` with
+  `O_RDONLY | O_NOFOLLOW` and `fstat` the descriptor to re-assert regular-file +
+  `root:root` + no group/other bits, then copy **from that descriptor**, closing
+  the residual lstat→open TOCTOU on the canonical source.
+- **Confined-identity executability:** verify `testdisk` is actually executable
+  by the confined recovery uid/gid (it is re-exec'd *after* the `setpriv` drop);
+  the current resolution check only requires some executable bit.
+- **`/log` behavior:** validate TestDisk 7.1's exact append vs truncate behavior
+  for a pre-existing `evidence/testdisk.log`, to finalize the log-reuse policy
+  that is currently gated behind an operator confirmation.
+- **Minimized environment / TERM:** validate that the minimized child environment
+  (fixed `PATH` + `TERM`/`LANG`/`LC_ALL`/`LC_CTYPE` only) is sufficient for the
+  interactive ncurses TestDisk TUI, including correct `TERM` handling.
+- **Root-mode launch procedure:** confirm the actual root-mode launch procedure
+  for `Source/bin/sentinel` on MiniBerry (how the process is started as root),
+  since no root/sudo relaunch mechanism exists in the codebase.
 
 ---
 
@@ -630,9 +756,11 @@ addition, not a redesign):
    `working/`). Prep includes the free-space precheck, the atomic
    `.tmp`→verify→`fsync`→`rename`→`chown`→cleanup sequence (§3/§6), and launching
    TestDisk via the configured privilege-drop mechanism and execution mode (§7A).
-3. **SENTINEL menu extension** in `_run_recovery_method_selection(...)`: replace
-   the current "TestDisk planned" note with a real option, add the replace
-   confirmation gate, and present objective/inputs/outputs. Reuse
+3. **SENTINEL menu extension** in `_run_recovery_method_selection(...)`
+   — **implemented** (see *Implemented production wiring (recovery menu)*): the
+   former "TestDisk planned" note was replaced with a real `[2] TestDisk`
+   option, the replace/reuse/log confirmation gates and the objective/
+   inputs/outputs preview were added, and it reuses
    `append_running_recovery_operation(session, RecoveryOperationType.TESTDISK
    .value)` / `complete_recovery_operation(...)`.
 4. **ORACLE recommendation** update so TestDisk is recommended first (LOW) when
