@@ -18,6 +18,7 @@ SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
 sys.path.insert(0, str(SOURCE_ROOT))
 
 # ARCHIVE-internal helpers and the two module-public execution entry points.
+import modules.archive as archive  # noqa: E402
 from modules.archive import (  # noqa: E402
     _TESTDISK_LOG_MODE,
     _TESTDISK_RECOVERED_DIR_MODE,
@@ -241,20 +242,43 @@ def _make_session():
 
 
 def _prepare(fs, *, config=None, geteuid=lambda: 0, command_resolver=None,
-             identity_resolver=None, source_environ=None):
-    return prepare_testdisk_execution(
-        _make_session(),
-        config if config is not None else _valid_config(),
-        identity_resolver=identity_resolver or _identity(),
-        command_resolver=command_resolver or fs.resolver(),
-        geteuid=geteuid,
-        stat_provider=fs.stat,
-        statvfs_provider=fs.statvfs,
-        lstat_provider=fs.lstat,
-        source_environ=source_environ if source_environ is not None
-        else {"TERM": "xterm-256color"},
-        fs_ops=fs,
-    )
+             identity_resolver=None, source_environ=None,
+             acquisition_gate_passes=True):
+    acquisition_patcher = None
+    if acquisition_gate_passes:
+        acquisition_patcher = mock.patch.object(
+            archive,
+            "classify_acquisition_state",
+            return_value={
+                "state": "completed_canonical",
+                "code": "ACQUISITION_COMPLETED_CANONICAL",
+                "message": (
+                    "Canonical acquisition is complete and fingerprint exists."
+                ),
+                "image_exists": True,
+                "map_exists": True,
+                "sha256_exists": True,
+            },
+        )
+        acquisition_patcher.start()
+
+    try:
+        return prepare_testdisk_execution(
+            _make_session(),
+            config if config is not None else _valid_config(),
+            identity_resolver=identity_resolver or _identity(),
+            command_resolver=command_resolver or fs.resolver(),
+            geteuid=geteuid,
+            stat_provider=fs.stat,
+            statvfs_provider=fs.statvfs,
+            lstat_provider=fs.lstat,
+            source_environ=source_environ if source_environ is not None
+            else {"TERM": "xterm-256color"},
+            fs_ops=fs,
+        )
+    finally:
+        if acquisition_patcher is not None:
+            acquisition_patcher.stop()
 
 
 SETPRIV_PATH = "/usr/bin/setpriv"
@@ -428,18 +452,29 @@ class PrepareExecutionTests(unittest.TestCase):
     def test_no_lifecycle_status_or_persistence_side_effects(self):
         fs = FakeExecFs()
         session = _make_session()
-        prepare_testdisk_execution(
-            session,
-            _valid_config(),
-            identity_resolver=_identity(),
-            command_resolver=fs.resolver(),
-            geteuid=lambda: 0,
-            stat_provider=fs.stat,
-            statvfs_provider=fs.statvfs,
-            lstat_provider=fs.lstat,
-            source_environ={"TERM": "xterm"},
-            fs_ops=fs,
-        )
+        with mock.patch.object(
+            archive,
+            "classify_acquisition_state",
+            return_value={
+                "state": "completed_canonical",
+                "code": "ACQUISITION_COMPLETED_CANONICAL",
+                "message": (
+                    "Canonical acquisition is complete and fingerprint exists."
+                ),
+            },
+        ):
+            prepare_testdisk_execution(
+                session,
+                _valid_config(),
+                identity_resolver=_identity(),
+                command_resolver=fs.resolver(),
+                geteuid=lambda: 0,
+                stat_provider=fs.stat,
+                statvfs_provider=fs.statvfs,
+                lstat_provider=fs.lstat,
+                source_environ={"TERM": "xterm"},
+                fs_ops=fs,
+            )
         # Status is untouched and no recovery-operations record was attached.
         self.assertEqual(session.status, "RECOVERING")
         self.assertFalse(hasattr(session, "recovery_operations"))

@@ -733,6 +733,44 @@ def _refuse_imaging_result(message, *, code=None, display_args=None):
     return result
 
 
+def _log_recovery_acquisition_state(session, acquisition_state):
+    log_info(
+        session,
+        "ARCHIVE",
+        f"Acquisition state classified: {acquisition_state['state']}",
+    )
+
+
+def _recovery_refused_acquisition_incomplete(
+    acquisition_state,
+    *,
+    tool_code_prefix,
+):
+    message = "Recovery refused: canonical acquisition is not complete."
+    return {
+        "message": message,
+        "code": f"{tool_code_prefix}_REFUSED_ACQUISITION_INCOMPLETE",
+        "display_args": {"state": acquisition_state["state"]},
+    }
+
+
+def _require_completed_canonical_for_recovery(session):
+    """
+    Fail closed unless acquisition state is exactly completed_canonical.
+
+    Returns an acquisition-state dict when recovery must be refused, or None
+    when recovery may proceed.
+    """
+
+    acquisition_state = classify_acquisition_state(session.recovery_path)
+    _log_recovery_acquisition_state(session, acquisition_state)
+
+    if acquisition_state["state"] == "completed_canonical":
+        return None
+
+    return acquisition_state
+
+
 def execute_forensic_image(session, *, resume=False, exclude_mount_targets=None):
     """
     Create or resume a forensic image of the source device using ddrescue.
@@ -1403,6 +1441,17 @@ def execute_photorec_recovery(session):
     if not shutil.which("photorec"):
         result["code"] = "PHOTOREC_NOT_INSTALLED"
         result["message"] = "PhotoRec is not installed."
+        log_error(session, "ARCHIVE", result["message"])
+        return result
+
+    refused_state = _require_completed_canonical_for_recovery(session)
+    if refused_state is not None:
+        refusal = _recovery_refused_acquisition_incomplete(
+            refused_state,
+            tool_code_prefix="PHOTOREC",
+        )
+        result.update(refusal)
+        result["status"] = "refused"
         log_error(session, "ARCHIVE", result["message"])
         return result
 
@@ -3095,6 +3144,20 @@ def prepare_testdisk_execution(
     fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
     if source_environ is None:
         source_environ = os.environ
+
+    refused_state = _require_completed_canonical_for_recovery(session)
+    if refused_state is not None:
+        refusal = _recovery_refused_acquisition_incomplete(
+            refused_state,
+            tool_code_prefix="TESTDISK",
+        )
+        return _testdisk_result(
+            False,
+            refusal["code"],
+            refusal["message"],
+            status="refused",
+            display_args=refusal["display_args"],
+        )
 
     structure_error = _validate_testdisk_config_structure(testdisk_config)
     if structure_error is not None:
