@@ -410,7 +410,7 @@ class AegisAssessmentContextDisplayTests(unittest.TestCase):
         self._env_patch.stop()
         init_language(SOURCE_ROOT)
 
-    def _run_context(self, language):
+    def _run_context(self, language, law=None):
         set_language(language, persist=False)
 
         printed = []
@@ -442,6 +442,7 @@ class AegisAssessmentContextDisplayTests(unittest.TestCase):
         decision.reason = "External device."
         decision.risk = "LOW"
         decision.confidence = 100
+        decision.law = law
 
         assessment = mock.Mock()
         assessment.decision = decision
@@ -473,6 +474,35 @@ class AegisAssessmentContextDisplayTests(unittest.TestCase):
         self.assertLess(output.index("Decision"), output.index("Reason"))
         self.assertLess(output.index("Reason"), output.index("Risk"))
         self.assertLess(output.index("Risk"), output.index("Confidence"))
+
+    def test_law_displayed_when_present_en(self):
+        # SL-004: the governing Sentinel Law must appear in the live AEGIS
+        # display, after Confidence, and the code is shown verbatim.
+        output = self._run_context("en", law="SL-003")
+        self.assertIn("Law", output)
+        self.assertIn("SL-003", output)
+        self.assertLess(output.index("Confidence"), output.index("SL-003"))
+
+    def test_law_displayed_when_present_de(self):
+        output = self._run_context("de", law="SL-003")
+        self.assertIn("Gesetz", output)
+        # Law codes are identifiers and must never be translated.
+        self.assertIn("SL-003", output)
+
+    def test_law_line_omitted_when_absent(self):
+        for language in ("en", "de"):
+            with self.subTest(language=language):
+                output = self._run_context(language, law=None)
+                label = tr("aegis.label.law").strip()
+                self.assertNotIn(label, output)
+                self.assertNotIn("SL-", output)
+
+    def test_law_label_keys_present_en_and_de(self):
+        # A missing key would render as "[aegis.label.law]".
+        for language in ("en", "de"):
+            with self.subTest(language=language):
+                set_language(language, persist=False)
+                self.assertFalse(tr("aegis.label.law").startswith("["))
 
 
 class SentinelLocalizationRegressionTests(unittest.TestCase):

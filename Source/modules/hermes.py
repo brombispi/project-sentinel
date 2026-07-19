@@ -343,12 +343,17 @@ class Hermes:
         return fields
 
     def _build_assessment_results(self, manifest):
+        law = _manifest_field(manifest, "assessment", "law")
         return {
             self._t("report.field.decision"): _manifest_field(
                 manifest, "assessment", "decision"
             ),
             self._t("report.field.reason"): _manifest_field(
                 manifest, "assessment", "reason"
+            ),
+            self._t("report.field.law"): (
+                law if law is not None
+                else self._t("report.placeholder.not_recorded")
             ),
             self._t("report.field.risk"): _manifest_field(
                 manifest, "assessment", "risk"

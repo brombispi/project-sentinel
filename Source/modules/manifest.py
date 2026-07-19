@@ -107,6 +107,7 @@ def write_case_manifest(session, device, assessment, intake=None):
         "assessment": {
             "decision": assessment.decision.status,
             "reason": assessment.decision.reason,
+            "law": assessment.decision.law,
             "risk": assessment.decision.risk,
             "confidence": assessment.decision.confidence,
         },

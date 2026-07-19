@@ -12,7 +12,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 from core.session import RecoverySession
 from core.status import RecoveryStatus
-from modules import case_loader, session_manager
+from modules import case_loader, manifest, session_manager
 from modules.case_discovery import archive_case
 
 
@@ -32,6 +32,7 @@ def _fake_assessment():
     decision = SimpleNamespace(
         status="APPROVED",
         reason="External device.",
+        law=None,
         risk="LOW",
         confidence=100,
     )
@@ -249,6 +250,112 @@ class CompletedAtLoadTests(unittest.TestCase):
                 result["session"].completed_at,
                 "2026-07-16T11:02:55",
             )
+
+
+class GoverningLawPersistenceTests(unittest.TestCase):
+    """SL-004: the governing Sentinel Law is a permanent part of the audit
+    trail. It must be written into the manifest exactly as AEGIS produced it
+    and restored on load, while legacy manifests without the field stay valid."""
+
+    def setUp(self):
+        self.size_patcher = mock.patch(
+            "modules.manifest.get_block_device_size_bytes",
+            return_value=123456,
+        )
+        self.size_patcher.start()
+
+    def tearDown(self):
+        self.size_patcher.stop()
+
+    def test_manifest_records_governing_law(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = _session(temp_dir)
+            session.assessment.decision.status = "STOP"
+            session.assessment.decision.reason = (
+                "Source device identity cannot be trusted."
+            )
+            session.assessment.decision.law = "SL-003"
+
+            manifest.write_case_manifest(
+                session,
+                session.source_device,
+                session.assessment,
+            )
+
+            data = _read_manifest(temp_dir)
+            self.assertEqual(data["assessment"]["law"], "SL-003")
+
+    def test_manifest_records_null_law_for_approved_decision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = _session(temp_dir)  # APPROVED, no governing law.
+
+            manifest.write_case_manifest(
+                session,
+                session.source_device,
+                session.assessment,
+            )
+
+            data = _read_manifest(temp_dir)
+            self.assertIn("law", data["assessment"])
+            self.assertIsNone(data["assessment"]["law"])
+
+    def _load(self, case_dir, temp_dir):
+        with mock.patch(
+            "modules.case_loader.enumerate_all_permitted_roots",
+            return_value=[{"path": Path(temp_dir).resolve()}],
+        ):
+            return case_loader.load_case(case_dir, devices=[])
+
+    def test_load_restores_governing_law(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir) / "REC-2026-000001"
+            case_dir.mkdir(parents=True)
+            _write_manifest(
+                case_dir,
+                {
+                    "session_id": "REC-2026-000001",
+                    "case_name": "Law Case",
+                    "created_at": "2026-07-16T10:00:00",
+                    "status": RecoveryStatus.COMPLETED,
+                    "assessment": {
+                        "decision": "STOP",
+                        "reason": "Source device identity cannot be trusted.",
+                        "law": "SL-003",
+                        "risk": "CRITICAL",
+                        "confidence": 100,
+                    },
+                },
+            )
+
+            result = self._load(case_dir, temp_dir)
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["assessment"].decision.law, "SL-003")
+
+    def test_legacy_manifest_without_law_loads_with_none(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = Path(temp_dir) / "REC-2026-000001"
+            case_dir.mkdir(parents=True)
+            _write_manifest(
+                case_dir,
+                {
+                    "session_id": "REC-2026-000001",
+                    "case_name": "Legacy Case",
+                    "created_at": "2026-07-16T10:00:00",
+                    "status": RecoveryStatus.COMPLETED,
+                    "assessment": {
+                        "decision": "APPROVED",
+                        "reason": "External device.",
+                        "risk": "LOW",
+                        "confidence": 100,
+                    },
+                },
+            )
+
+            result = self._load(case_dir, temp_dir)
+
+            self.assertTrue(result["success"])
+            self.assertIsNone(result["assessment"].decision.law)
 
 
 if __name__ == "__main__":

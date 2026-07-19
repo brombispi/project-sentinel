@@ -274,6 +274,40 @@ class TechnicianReportLocalizationTests(unittest.TestCase):
             report_de["Abbildungsdetails"]["Abbildpfad"], "images/source.img"
         )
 
+    def test_governing_law_label_localized_and_code_untranslated(self):
+        manifest = _populated_manifest()
+        manifest["assessment"] = {
+            "decision": "STOP",
+            "reason": "Source device identity cannot be trusted.",
+            "law": "SL-003",
+            "risk": "CRITICAL",
+            "confidence": 100,
+        }
+
+        report_en, _ = self._report("en", manifest=manifest)
+        report_de, _ = self._report("de", manifest=manifest)
+
+        # The label is localized prose; the law code itself is a fact.
+        self.assertEqual(
+            report_en["Assessment Results"]["Governing Law"], "SL-003"
+        )
+        self.assertEqual(
+            report_de["Bewertungsergebnisse"]["Maßgebliches Gesetz"], "SL-003"
+        )
+
+    def test_governing_law_placeholder_localized_when_absent(self):
+        # _populated_manifest has an APPROVED assessment with no law.
+        report_en, _ = self._report("en")
+        report_de, _ = self._report("de")
+
+        self.assertEqual(
+            report_en["Assessment Results"]["Governing Law"], "Not recorded"
+        )
+        self.assertEqual(
+            report_de["Bewertungsergebnisse"]["Maßgebliches Gesetz"],
+            "Nicht erfasst",
+        )
+
     def test_rendering_does_not_mutate_global_language(self):
         set_language("en", persist=False)
         self._report("de")

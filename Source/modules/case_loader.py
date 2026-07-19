@@ -287,7 +287,7 @@ def _reconstruct_assessment(manifest, source_device):
         status=assessment_data["decision"],
         reason=assessment_data.get("reason", ""),
         evidence="Loaded from persisted case.",
-        law=None,
+        law=assessment_data.get("law"),
         risk=assessment_data.get("risk", "UNKNOWN"),
         confidence=assessment_data.get("confidence", 0),
         recommendation="Loaded from persisted case.",

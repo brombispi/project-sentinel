@@ -360,6 +360,34 @@ class HermesTests(unittest.TestCase):
             self.assertEqual(report["Assessment Results"]["Reason"], "External device.")
             self.assertEqual(report["Assessment Results"]["Risk"], "LOW")
             self.assertEqual(report["Assessment Results"]["Confidence"], 100)
+            # APPROVED decision carries no governing law; HERMES must render the
+            # localized placeholder rather than Python None.
+            self.assertEqual(
+                report["Assessment Results"]["Governing Law"],
+                "Not recorded",
+            )
+
+    def test_build_technician_report_records_governing_law(self):
+        # SL-004: a STOP decision governed by a Sentinel Law must surface the
+        # recorded law verbatim, read only from the manifest.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            manifest = _populated_manifest()
+            manifest["assessment"] = {
+                "decision": "STOP",
+                "reason": "Source device identity cannot be trusted.",
+                "law": "SL-003",
+                "risk": "CRITICAL",
+                "confidence": 100,
+            }
+            _write_manifest(case_dir, manifest)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(
+                report["Assessment Results"]["Governing Law"],
+                "SL-003",
+            )
 
     def test_build_technician_report_missing_manifest_raises_manifest_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -412,6 +440,12 @@ class HermesTests(unittest.TestCase):
             self.assertIsNone(report["Assessment Results"]["Reason"])
             self.assertIsNone(report["Assessment Results"]["Risk"])
             self.assertIsNone(report["Assessment Results"]["Confidence"])
+            # A legacy manifest with no assessment block must render the
+            # localized placeholder for the governing law, never None.
+            self.assertEqual(
+                report["Assessment Results"]["Governing Law"],
+                "Not recorded",
+            )
 
             imaging = report["Imaging Details"]
             self.assertEqual(imaging["Acquisition State"], "no_acquisition")

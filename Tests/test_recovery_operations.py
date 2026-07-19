@@ -37,6 +37,7 @@ def _fake_assessment():
     decision = SimpleNamespace(
         status="APPROVED",
         reason="External device.",
+        law=None,
         risk="LOW",
         confidence=100,
     )

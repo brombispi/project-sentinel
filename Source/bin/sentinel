@@ -756,6 +756,8 @@ def _print_assessment_context(source_device, assessment, strategy):
         tr("aegis.label.confidence"),
         f"{assessment.decision.confidence}%",
     )
+    if assessment.decision.law:
+        print(tr("aegis.label.law"), assessment.decision.law)
 
     print()
     print(tr("assessment.section.oracle"))
