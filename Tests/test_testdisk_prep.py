@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 import sys
@@ -23,6 +24,7 @@ from modules.archive import (  # noqa: E402
     _build_testdisk_child_env,
     _check_working_free_space,
     _default_identity_resolver,
+    _open_and_revalidate_canonical_fd,
     _prepare_protected_target,
     _prepare_testdisk_output_targets,
     _prepare_testdisk_working_copy,
@@ -68,20 +70,75 @@ def _statvfs(*, bavail, frsize=4096):
     return SimpleNamespace(f_bavail=bavail, f_frsize=frsize)
 
 
+def _fstat(*, uid=0, gid=0, perm=0o400, kind="file", dev=101, ino=555,
+           size=100):
+    type_bits = {
+        "file": stat.S_IFREG,
+        "dir": stat.S_IFDIR,
+        "symlink": stat.S_IFLNK,
+        "fifo": stat.S_IFIFO,
+    }[kind]
+    return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=type_bits | perm,
+                           st_dev=dev, st_ino=ino, st_size=size)
+
+
+# An opaque, non-None descriptor value handed to _prepare_testdisk_working_copy
+# in the fake-fs tests (the canonical fd is opened/validated separately).
+FAKE_CANONICAL_FD = 7
+
+
+class FakeCanonicalFdFs:
+    """
+    Minimal fake for _open_and_revalidate_canonical_fd: models opening the
+    canonical image and fstat'ing the descriptor, recording close() so
+    descriptor lifecycle can be asserted. No real files.
+    """
+
+    def __init__(self, *, open_error=None, fstat_result=None,
+                 fstat_error=None):
+        self.open_error = open_error
+        self.fstat_result = fstat_result
+        self.fstat_error = fstat_error
+        self.calls = []
+        self.closed = []
+        self._next_fd = 7
+
+    def open_canonical(self, path):
+        self.calls.append(("open_canonical", path))
+        if self.open_error is not None:
+            raise self.open_error
+        fd = self._next_fd
+        self._next_fd += 1
+        return fd
+
+    def fstat(self, fd):
+        self.calls.append(("fstat", fd))
+        if self.fstat_error is not None:
+            raise self.fstat_error
+        return self.fstat_result
+
+    def close(self, fd):
+        self.calls.append(("close", fd))
+        self.closed.append(fd)
+
+    def call_names(self):
+        return [c[0] for c in self.calls]
+
+
 class FakeFsOps:
     """
     In-memory filesystem operations for working-copy preparation tests. Records
     the ordered sequence of calls and can be told to raise OSError at a named
-    step. No real files, no privileged operations.
+    step. The canonical image is supplied as an already-open descriptor and
+    copied via copy_fd_to_path; no real files, no privileged operations.
     """
 
-    def __init__(self, *, source_path, source_size=100, copied_size=None,
-                 fail_on=None):
+    def __init__(self, *, source_size=100, copied_size=None, fail_on=None):
         self.calls = []
         self.fail_on = set(fail_on or [])
         self.source_size = source_size
         self.copied_size = source_size if copied_size is None else copied_size
-        self.files = {str(source_path): source_size}
+        self.files = {}
         self.owners = {}
         self.modes = {}
 
@@ -105,8 +162,8 @@ class FakeFsOps:
         self.files[path] = 0
         self.modes[path] = mode
 
-    def copy(self, source, destination):
-        self.calls.append(("copy", source, destination))
+    def copy_fd_to_path(self, source_fd, destination):
+        self.calls.append(("copy", source_fd, destination))
         self._maybe_fail("copy")
         self.files[destination] = self.copied_size
 
@@ -775,18 +832,136 @@ class FreeSpaceTests(unittest.TestCase):
         self.assertEqual(result["code"], "TESTDISK_FREE_SPACE_UNDETERMINED")
 
 
+class OpenAndRevalidateCanonicalFdTests(unittest.TestCase):
+    """
+    fd-based canonical revalidation: the canonical image is opened once
+    (O_RDONLY | O_NOFOLLOW) and revalidated on the descriptor, so the path
+    cannot be swapped between validation and copy. Failures fail closed and
+    always close the descriptor; success returns the OPEN fd for the caller.
+    """
+
+    PATH = "/case/images/source.img"
+
+    def _open(self, fs, *, expected_dev=101, expected_ino=555):
+        return _open_and_revalidate_canonical_fd(
+            self.PATH,
+            recovery_uid=999,
+            recovery_gid=991,
+            expected_dev=expected_dev,
+            expected_ino=expected_ino,
+            fs_ops=fs,
+        )
+
+    def test_success_returns_open_fd_and_size(self):
+        fs = FakeCanonicalFdFs(fstat_result=_fstat(uid=0, gid=0, perm=0o400,
+                                                   dev=101, ino=555, size=100))
+        result = self._open(fs)
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_FD_VALIDATED")
+        self.assertEqual(result["size"], 100)
+        # The descriptor is returned OPEN for the caller (not closed here).
+        self.assertIn("fd", result)
+        self.assertEqual(fs.closed, [])
+
+    def test_symlink_open_is_refused_and_no_fd_leaks(self):
+        fs = FakeCanonicalFdFs(open_error=OSError(errno.ELOOP, "symlink"))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_IS_SYMLINK")
+        # Open failed, so there is no descriptor to close.
+        self.assertEqual(fs.closed, [])
+
+    def test_missing_source_is_refused(self):
+        fs = FakeCanonicalFdFs(open_error=FileNotFoundError(self.PATH))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_SOURCE_IMAGE_MISSING")
+
+    def test_generic_open_error_is_refused(self):
+        fs = FakeCanonicalFdFs(open_error=OSError(errno.EACCES, "denied"))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_OPEN_FAILED")
+
+    def test_fstat_error_is_refused_and_closes_fd(self):
+        fs = FakeCanonicalFdFs(fstat_error=OSError("fstat denied"))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_FSTAT_FAILED")
+        self.assertEqual(len(fs.closed), 1)
+
+    def test_non_regular_is_refused_and_closes_fd(self):
+        fs = FakeCanonicalFdFs(fstat_result=_fstat(kind="dir"))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_NOT_REGULAR")
+        self.assertEqual(len(fs.closed), 1)
+
+    def test_owned_by_recovery_uid_is_refused_and_closes_fd(self):
+        fs = FakeCanonicalFdFs(fstat_result=_fstat(uid=999, gid=0, perm=0o400))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_OWNED_BY_RECOVERY")
+        self.assertEqual(len(fs.closed), 1)
+
+    def test_owned_by_recovery_gid_is_refused(self):
+        fs = FakeCanonicalFdFs(fstat_result=_fstat(uid=0, gid=991, perm=0o400))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_OWNED_BY_RECOVERY")
+
+    def test_permissive_is_refused(self):
+        fs = FakeCanonicalFdFs(fstat_result=_fstat(uid=0, gid=0, perm=0o440))
+        result = self._open(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_PERMISSIVE")
+
+    def test_dev_ino_mismatch_is_refused_and_closes_fd(self):
+        # The descriptor's inode differs from the preliminary lstat's inode:
+        # the path was replaced between lstat and open -> fail closed.
+        fs = FakeCanonicalFdFs(
+            fstat_result=_fstat(uid=0, gid=0, perm=0o400, dev=101, ino=999)
+        )
+        result = self._open(fs, expected_dev=101, expected_ino=555)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_FD_MISMATCH")
+        self.assertEqual(len(fs.closed), 1)
+
+    def test_dev_mismatch_is_refused(self):
+        fs = FakeCanonicalFdFs(
+            fstat_result=_fstat(uid=0, gid=0, perm=0o400, dev=202, ino=555)
+        )
+        result = self._open(fs, expected_dev=101, expected_ino=555)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_FD_MISMATCH")
+
+    def test_identity_check_skipped_when_expected_absent(self):
+        # When no preliminary dev/ino is supplied, the match check is skipped.
+        fs = FakeCanonicalFdFs(
+            fstat_result=_fstat(uid=0, gid=0, perm=0o400, dev=1, ino=2)
+        )
+        result = self._open(fs, expected_dev=None, expected_ino=None)
+        self.assertTrue(result["success"], result)
+
+
 class PrepareWorkingCopyTests(unittest.TestCase):
-    SOURCE = "/case/images/source.img"
     WORKING = "/case/working"
     FINAL = f"/case/working/{_TESTDISK_WORKING_COPY_FILENAME}"
     TMP = f"/case/working/{_TESTDISK_WORKING_COPY_FILENAME}.tmp"
 
-    def test_success_sequence_and_ownership(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100)
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
+    def _prepare(self, fs, *, source_size=100):
+        return _prepare_testdisk_working_copy(
+            FAKE_CANONICAL_FD,
+            source_size=source_size,
+            working_dir=self.WORKING,
+            owner_uid=999,
+            owner_gid=991,
+            fs_ops=fs,
         )
+
+    def test_success_sequence_and_ownership(self):
+        fs = FakeFsOps(source_size=100)
+        result = self._prepare(fs)
         self.assertTrue(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_PREPARED")
         self.assertEqual(result["path"], self.FINAL)
@@ -806,6 +981,10 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertLess(names.index("chown"), names.index("chmod"))
         self.assertLess(names.index("chmod"), names.index("rename"))
         self.assertLess(names.index("rename"), names.index("fsync_dir"))
+        # The copy reads from the passed-in descriptor, never a source path.
+        copy_call = next(c for c in fs.calls if c[0] == "copy")
+        self.assertEqual(copy_call[1], FAKE_CANONICAL_FD)
+        self.assertEqual(copy_call[2], self.TMP)
         # chown/chmod act on the .tmp path (pre-rename), not the final path.
         chown_call = next(c for c in fs.calls if c[0] == "chown")
         chmod_call = next(c for c in fs.calls if c[0] == "chmod")
@@ -817,11 +996,8 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertEqual(fs.modes[self.FINAL], _TESTDISK_WORKING_COPY_MODE)
 
     def test_tmp_is_restricted_to_0600_before_copy(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100)
-        _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100)
+        self._prepare(fs)
         # The create_secure_file call must carry 0600 and precede the copy call.
         create_call = next(c for c in fs.calls if c[0] == "create_secure_file")
         copy_index = fs.call_names().index("copy")
@@ -830,12 +1006,8 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertLess(create_index, copy_index)
 
     def test_create_failure_cleans_up(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"create_secure_file"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"create_secure_file"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_CREATE_FAILED")
         self.assertNotIn(self.TMP, fs.files)
@@ -843,92 +1015,57 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertNotIn("copy", fs.call_names())
 
     def test_stale_tmp_is_removed_before_create(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100)
+        fs = FakeFsOps(source_size=100)
         fs.files[self.TMP] = 42  # stale temp present
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        result = self._prepare(fs)
         self.assertTrue(result["success"])
         names = fs.call_names()
         self.assertLess(names.index("unlink"), names.index("create_secure_file"))
 
-    def test_missing_source_is_refused(self):
-        fs = FakeFsOps(source_path="/other", source_size=100)
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
-        self.assertFalse(result["success"])
-        self.assertEqual(result["code"], "TESTDISK_SOURCE_IMAGE_MISSING")
-
     def test_stale_tmp_cleanup_failure_is_reported(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"unlink"})
+        fs = FakeFsOps(source_size=100, fail_on={"unlink"})
         fs.files[self.TMP] = 42
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(
             result["code"], "TESTDISK_WORKING_COPY_STALE_TMP_CLEANUP_FAILED"
         )
 
     def test_copy_failure_cleans_tmp(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"copy"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"copy"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_COPY_FAILED")
         self.assertNotIn(self.TMP, fs.files)
         self.assertNotIn(self.FINAL, fs.files)
 
     def test_size_mismatch_cleans_tmp(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100, copied_size=99)
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, copied_size=99)
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_SIZE_MISMATCH")
         self.assertNotIn(self.TMP, fs.files)
         self.assertNotIn(self.FINAL, fs.files)
 
     def test_fsync_file_failure_cleans_tmp(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"fsync_file"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"fsync_file"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_FSYNC_FAILED")
         self.assertNotIn(self.TMP, fs.files)
         self.assertNotIn(self.FINAL, fs.files)
 
     def test_rename_failure_cleans_tmp(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"rename"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"rename"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_RENAME_FAILED")
         self.assertNotIn(self.TMP, fs.files)
         self.assertNotIn(self.FINAL, fs.files)
 
     def test_dir_fsync_failure_after_rename_removes_final(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"fsync_dir"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"fsync_dir"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_FSYNC_FAILED")
         self.assertNotIn(self.FINAL, fs.files)
@@ -938,12 +1075,8 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         # Ownership is now applied to the .tmp BEFORE the rename, so a chown
         # failure is a pre-rename failure: the tmp is cleaned up and no final
         # file is ever created.
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"chown"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"chown"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED")
         self.assertNotIn(self.FINAL, fs.files)
@@ -952,12 +1085,8 @@ class PrepareWorkingCopyTests(unittest.TestCase):
         self.assertNotIn("rename", fs.call_names())
 
     def test_chmod_failure_before_rename_cleans_tmp_and_no_final(self):
-        fs = FakeFsOps(source_path=self.SOURCE, source_size=100,
-                       fail_on={"chmod"})
-        result = _prepare_testdisk_working_copy(
-            self.SOURCE, self.WORKING,
-            owner_uid=999, owner_gid=991, fs_ops=fs,
-        )
+        fs = FakeFsOps(source_size=100, fail_on={"chmod"})
+        result = self._prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_OWNERSHIP_FAILED")
         self.assertNotIn(self.FINAL, fs.files)
@@ -1257,14 +1386,39 @@ class RealFilesystemPreparationTests(unittest.TestCase):
             directory.mkdir(parents=True, exist_ok=True)
         self.source = self.images / "source.img"
         self.source.write_bytes(b"CANONICAL-IMAGE-CONTENT")
+        # The canonical image is owner-only (root:root 0400 in production); the
+        # fd revalidation refuses any group/other bits, so mirror that here.
+        os.chmod(self.source, 0o400)
+
+    def _run_working_copy(self, fs):
+        # Open + revalidate the canonical descriptor exactly as the production
+        # path does, then copy the working copy from that descriptor. The
+        # descriptor lifecycle is explicit and always closed.
+        fd_result = _open_and_revalidate_canonical_fd(
+            self.source,
+            recovery_uid=self.uid + 1,
+            recovery_gid=self.gid + 1,
+            expected_dev=None,
+            expected_ino=None,
+            fs_ops=fs,
+        )
+        self.assertTrue(fd_result["success"], fd_result)
+        fd = fd_result["fd"]
+        try:
+            return _prepare_testdisk_working_copy(
+                fd,
+                source_size=fd_result["size"],
+                working_dir=self.working,
+                owner_uid=self.uid,
+                owner_gid=self.gid,
+                fs_ops=fs,
+            )
+        finally:
+            fs.close(fd)
 
     def test_working_copy_secure_creation_rename_and_mode(self):
         final = self.working / _TESTDISK_WORKING_COPY_FILENAME
-        result = _prepare_testdisk_working_copy(
-            self.source, self.working,
-            owner_uid=self.uid, owner_gid=self.gid,
-            fs_ops=_DefaultTestdiskFsOps(),
-        )
+        result = self._run_working_copy(_DefaultTestdiskFsOps())
         self.assertTrue(result["success"], result)
         self.assertTrue(final.is_file())
         self.assertEqual(stat.S_IMODE(final.stat().st_mode),
@@ -1275,15 +1429,36 @@ class RealFilesystemPreparationTests(unittest.TestCase):
         tmp = final.with_name(final.name + ".tmp")
         self.assertFalse(tmp.exists())
 
+    def test_canonical_fd_open_success_returns_size(self):
+        fs = _DefaultTestdiskFsOps()
+        result = _open_and_revalidate_canonical_fd(
+            self.source, recovery_uid=self.uid + 1, recovery_gid=self.gid + 1,
+            fs_ops=fs,
+        )
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["size"], self.source.stat().st_size)
+        fs.close(result["fd"])
+
+    def test_canonical_symlink_rejected_by_o_nofollow(self):
+        # A symlink at the canonical path must be refused at open time via
+        # O_NOFOLLOW, even though its target is a valid regular file.
+        link = self.images / "source_link.img"
+        os.symlink(self.source, link)
+        result = _open_and_revalidate_canonical_fd(
+            link, recovery_uid=self.uid + 1, recovery_gid=self.gid + 1,
+            fs_ops=_DefaultTestdiskFsOps(),
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_CANONICAL_IS_SYMLINK")
+        # The symlink and its target are left untouched.
+        self.assertTrue(os.path.islink(link))
+        self.assertTrue(self.source.is_file())
+
     def test_stale_tmp_is_cleaned_before_creation(self):
         final = self.working / _TESTDISK_WORKING_COPY_FILENAME
         tmp = final.with_name(final.name + ".tmp")
         tmp.write_bytes(b"stale")
-        result = _prepare_testdisk_working_copy(
-            self.source, self.working,
-            owner_uid=self.uid, owner_gid=self.gid,
-            fs_ops=_DefaultTestdiskFsOps(),
-        )
+        result = self._run_working_copy(_DefaultTestdiskFsOps())
         self.assertTrue(result["success"], result)
         self.assertTrue(final.is_file())
         self.assertFalse(tmp.exists())
@@ -1291,11 +1466,7 @@ class RealFilesystemPreparationTests(unittest.TestCase):
     def test_post_rename_failure_removes_final(self):
         final = self.working / _TESTDISK_WORKING_COPY_FILENAME
         tmp = final.with_name(final.name + ".tmp")
-        result = _prepare_testdisk_working_copy(
-            self.source, self.working,
-            owner_uid=self.uid, owner_gid=self.gid,
-            fs_ops=_PostRenameFailFs(),
-        )
+        result = self._run_working_copy(_PostRenameFailFs())
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_FSYNC_FAILED")
         self.assertFalse(final.exists())
@@ -1357,11 +1528,7 @@ class RealFilesystemPreparationTests(unittest.TestCase):
         # ARCHIVE behaviour so a change would be visible).
         final = self.working / _TESTDISK_WORKING_COPY_FILENAME
         final.write_bytes(b"OLD-STALE-WORKING-COPY")
-        result = _prepare_testdisk_working_copy(
-            self.source, self.working,
-            owner_uid=self.uid, owner_gid=self.gid,
-            fs_ops=_DefaultTestdiskFsOps(),
-        )
+        result = self._run_working_copy(_DefaultTestdiskFsOps())
         self.assertTrue(result["success"], result)
         self.assertEqual(final.read_bytes(), self.source.read_bytes())
         self.assertEqual(stat.S_IMODE(final.stat().st_mode),

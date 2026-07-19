@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -1895,7 +1896,134 @@ def _validate_canonical_protection(
         "TESTDISK_CANONICAL_PROTECTED",
         "Canonical image is protected from the recovery identity.",
         status="ok",
+        # dev/ino from the preliminary lstat are carried forward so the later
+        # fd-based revalidation can assert the opened descriptor refers to the
+        # exact same object, closing the lstat->open TOCTOU window. Defaults to
+        # None when the provider (e.g. a test fake) omits them.
+        st_dev=getattr(info, "st_dev", None),
+        st_ino=getattr(info, "st_ino", None),
     )
+
+
+def _open_and_revalidate_canonical_fd(
+    canonical_image_path,
+    *,
+    recovery_uid,
+    recovery_gid,
+    expected_dev=None,
+    expected_ino=None,
+    fs_ops=None,
+):
+    """
+    Open the canonical image ONCE (O_RDONLY | O_NOFOLLOW) and revalidate it on
+    the resulting descriptor with fstat, so the path cannot be swapped between
+    validation and the working-copy byte copy. Re-asserts, on the descriptor,
+    everything the preliminary path lstat checked: the object is a regular file,
+    is not owned by the recovery uid or gid, and grants no group/other bits. When
+    the caller supplies the preliminary lstat's dev/ino, this also confirms the
+    descriptor points at that same inode (fail-closed on mismatch).
+
+    On success the OPEN descriptor is returned in the result under "fd"; the
+    CALLER owns its lifecycle and must close it. On any failure the descriptor is
+    closed here and a fail-closed result with a distinct code is returned.
+    """
+
+    fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
+    path = str(canonical_image_path)
+
+    try:
+        fd = fs.open_canonical(path)
+    except FileNotFoundError:
+        return _testdisk_result(
+            False,
+            "TESTDISK_SOURCE_IMAGE_MISSING",
+            f"Canonical image not found for working-copy preparation: {path}",
+            status="refused",
+            display_args={"path": path},
+        )
+    except OSError as error:
+        if getattr(error, "errno", None) in (errno.ELOOP, errno.EMLINK):
+            return _testdisk_result(
+                False,
+                "TESTDISK_CANONICAL_IS_SYMLINK",
+                f"Canonical image is a symlink; refusing to open it: {path}",
+                status="refused",
+                display_args={"path": path},
+            )
+        return _testdisk_result(
+            False,
+            "TESTDISK_CANONICAL_OPEN_FAILED",
+            f"Canonical image could not be opened: {error}",
+            status="refused",
+            display_args={"path": path, "error": str(error)},
+        )
+
+    close_fd = True
+    try:
+        try:
+            info = fs.fstat(fd)
+        except OSError as error:
+            return _testdisk_result(
+                False,
+                "TESTDISK_CANONICAL_FSTAT_FAILED",
+                f"Canonical descriptor could not be inspected: {error}",
+                status="refused",
+                display_args={"path": path, "error": str(error)},
+            )
+
+        if not stat.S_ISREG(info.st_mode):
+            return _testdisk_result(
+                False,
+                "TESTDISK_CANONICAL_NOT_REGULAR",
+                f"Canonical image is not a regular file: {path}",
+                status="refused",
+                display_args={"path": path},
+            )
+
+        if info.st_uid == recovery_uid or info.st_gid == recovery_gid:
+            return _testdisk_result(
+                False,
+                "TESTDISK_CANONICAL_OWNED_BY_RECOVERY",
+                "Canonical image is owned by the recovery identity.",
+                status="refused",
+                display_args={"path": path},
+            )
+
+        if info.st_mode & 0o077:
+            return _testdisk_result(
+                False,
+                "TESTDISK_CANONICAL_PERMISSIVE",
+                "Canonical image grants group/other access; must be owner-only.",
+                status="refused",
+                display_args={"path": path, "mode": oct(info.st_mode & 0o777)},
+            )
+
+        if expected_dev is not None and expected_ino is not None:
+            if info.st_dev != expected_dev or info.st_ino != expected_ino:
+                return _testdisk_result(
+                    False,
+                    "TESTDISK_CANONICAL_FD_MISMATCH",
+                    "Canonical descriptor does not match the validated path; "
+                    "refusing (possible path replacement).",
+                    status="refused",
+                    display_args={"path": path},
+                )
+
+        close_fd = False
+        return _testdisk_result(
+            True,
+            "TESTDISK_CANONICAL_FD_VALIDATED",
+            "Canonical image opened and revalidated on its descriptor.",
+            status="ok",
+            fd=fd,
+            size=info.st_size,
+        )
+    finally:
+        if close_fd:
+            try:
+                fs.close(fd)
+            except OSError:
+                pass
 
 
 def _validate_recovery_target(
@@ -2133,10 +2261,42 @@ class _DefaultTestdiskFsOps:
         finally:
             os.close(descriptor)
 
-    def copy(self, source, destination):
-        # copyfile opens the (already-created, 0600) destination for writing and
-        # truncates it; it does not alter the existing file mode.
-        shutil.copyfile(source, destination)
+    def open_canonical(self, path):
+        # Open the canonical image for reading WITHOUT following a final-component
+        # symlink (O_NOFOLLOW, where supported). If the final component is a
+        # symlink the open fails with ELOOP, which the caller maps to a symlink
+        # rejection — this is what closes the path-swap window: the returned
+        # descriptor, not the path, is used for every subsequent check and copy.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        return os.open(path, flags)
+
+    def fstat(self, fd):
+        # Stat the OPEN descriptor (not the path) so revalidation observes the
+        # exact object that will be copied, regardless of any concurrent rename
+        # or symlink swap at the path.
+        return os.fstat(fd)
+
+    def copy_fd_to_path(self, source_fd, destination):
+        # Copy bytes from the already-validated, open source descriptor into the
+        # (already-created, 0600) destination. The canonical image is NEVER
+        # reopened by path here. The source offset is reset first so the copy is
+        # complete even if the descriptor was read during validation.
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        dest_fd = os.open(destination, os.O_WRONLY | os.O_TRUNC)
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(dest_fd, view)
+                    view = view[written:]
+        finally:
+            os.close(dest_fd)
+
+    def close(self, fd):
+        os.close(fd)
 
     def size(self, path):
         return Path(path).stat().st_size
@@ -2186,9 +2346,10 @@ class _DefaultTestdiskFsOps:
 
 
 def _prepare_testdisk_working_copy(
-    source_image_path,
-    working_dir,
+    source_fd,
     *,
+    source_size,
+    working_dir,
     owner_uid,
     owner_gid,
     file_mode=_TESTDISK_WORKING_COPY_MODE,
@@ -2198,9 +2359,15 @@ def _prepare_testdisk_working_copy(
     Prepare the disposable working copy working/testdisk.img with atomic,
     failure-safe completion (TestDiskIntegration.md §3):
 
-        remove stale .tmp -> create restricted (0600) .tmp -> copy -> verify
-        size -> fsync file -> chown/chmod .tmp -> atomic rename -> fsync
-        directory
+        remove stale .tmp -> create restricted (0600) .tmp -> copy from the
+        already-validated canonical descriptor -> verify size -> fsync file ->
+        chown/chmod .tmp -> atomic rename -> fsync directory
+
+    The canonical image is passed as an ALREADY-OPEN, already-revalidated
+    descriptor (source_fd) with its fstat size (source_size); it is copied from
+    that descriptor and is never reopened by path here, so the path cannot be
+    swapped between validation and copy. The descriptor's lifecycle is owned by
+    the caller (it is not closed here).
 
     The temporary file is created with restrictive permissions BEFORE any image
     bytes are written, so the working copy is never transiently world-readable.
@@ -2215,7 +2382,6 @@ def _prepare_testdisk_working_copy(
 
     fs = fs_ops if fs_ops is not None else _DefaultTestdiskFsOps()
 
-    source = Path(source_image_path)
     working_dir = Path(working_dir)
     final_path = working_dir / _TESTDISK_WORKING_COPY_FILENAME
     tmp_path = final_path.with_name(
@@ -2230,17 +2396,6 @@ def _prepare_testdisk_working_copy(
                     fs.unlink(str(candidate))
             except OSError:
                 pass
-
-    try:
-        source_size = fs.size(str(source))
-    except OSError:
-        return _testdisk_result(
-            False,
-            "TESTDISK_SOURCE_IMAGE_MISSING",
-            f"Canonical image not found for working-copy preparation: {source}",
-            status="refused",
-            display_args={"path": str(source)},
-        )
 
     try:
         if fs.exists(str(tmp_path)):
@@ -2270,7 +2425,7 @@ def _prepare_testdisk_working_copy(
             )
 
         try:
-            fs.copy(str(source), str(tmp_path))
+            fs.copy_fd_to_path(source_fd, str(tmp_path))
         except OSError as error:
             _cleanup(False)
             return _testdisk_result(
@@ -3065,13 +3220,37 @@ def prepare_testdisk_execution(
     if not free_space_result["success"]:
         return free_space_result
 
-    working_copy_result = _prepare_testdisk_working_copy(
+    # Open the canonical image ONCE and revalidate it on the descriptor, then
+    # copy the working copy from that same descriptor. The path is never reopened
+    # for the copy, so it cannot be swapped between validation and copy. The
+    # descriptor lifecycle is owned here: closed in the finally regardless of the
+    # working-copy outcome.
+    canonical_fd_result = _open_and_revalidate_canonical_fd(
         canonical_image,
-        working_dir,
-        owner_uid=identity["uid"],
-        owner_gid=identity["gid"],
+        recovery_uid=identity["uid"],
+        recovery_gid=identity["gid"],
+        expected_dev=canonical_result.get("st_dev"),
+        expected_ino=canonical_result.get("st_ino"),
         fs_ops=fs,
     )
+    if not canonical_fd_result["success"]:
+        return canonical_fd_result
+
+    canonical_fd = canonical_fd_result["fd"]
+    try:
+        working_copy_result = _prepare_testdisk_working_copy(
+            canonical_fd,
+            source_size=canonical_fd_result["size"],
+            working_dir=working_dir,
+            owner_uid=identity["uid"],
+            owner_gid=identity["gid"],
+            fs_ops=fs,
+        )
+    finally:
+        try:
+            fs.close(canonical_fd)
+        except OSError:
+            pass
     if not working_copy_result["success"]:
         return working_copy_result
 

@@ -1,3 +1,4 @@
+import errno
 import os
 import stat
 import sys
@@ -6,6 +7,12 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+
+def _ino_for(path):
+    # A deterministic, stable fake inode per path so lstat and fstat agree for
+    # the same object (exercising the fd dev/ino identity check).
+    return abs(hash(path)) % 1_000_000 + 1
 
 SOURCE_ROOT = Path(__file__).resolve().parent.parent / "Source"
 sys.path.insert(0, str(SOURCE_ROOT))
@@ -70,6 +77,9 @@ class FakeExecFs:
                  bavail=10 ** 9, fail_on=None):
         self.fail_on = set(fail_on or [])
         self.bavail = bavail
+        self.open_fds = {}
+        self.closed_fds = []
+        self._next_fd = 21
         self.objects = {}
         for directory in ("/case", "/case/images", "/case/working",
                           "/case/recovered", "/case/evidence"):
@@ -124,9 +134,34 @@ class FakeExecFs:
             "is_symlink": False,
         }
 
-    def copy(self, source, destination):
+    def open_canonical(self, path):
+        self._maybe_fail("open_canonical")
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        if self.objects[path]["is_symlink"]:
+            raise OSError(errno.ELOOP, "symlink refused by O_NOFOLLOW")
+        fd = self._next_fd
+        self._next_fd += 1
+        self.open_fds[fd] = path
+        return fd
+
+    def fstat(self, fd):
+        path = self.open_fds[fd]
+        entry = self.objects[path]
+        return SimpleNamespace(
+            st_mode=self._mode_with_type(entry),
+            st_uid=entry["uid"], st_gid=entry["gid"], st_size=entry["size"],
+            st_dev=1, st_ino=_ino_for(path),
+        )
+
+    def copy_fd_to_path(self, source_fd, destination):
         self._maybe_fail("copy")
-        self.objects[destination]["size"] = self.objects[source]["size"]
+        source_path = self.open_fds[source_fd]
+        self.objects[destination]["size"] = self.objects[source_path]["size"]
+
+    def close(self, fd):
+        self.closed_fds.append(fd)
+        self.open_fds.pop(fd, None)
 
     def size(self, path):
         if path not in self.objects:
@@ -161,6 +196,7 @@ class FakeExecFs:
         return SimpleNamespace(
             st_mode=self._mode_with_type(entry),
             st_uid=entry["uid"], st_gid=entry["gid"],
+            st_dev=1, st_ino=_ino_for(path),
         )
 
     def mkdir(self, path, mode):
@@ -192,6 +228,7 @@ class FakeExecFs:
         return SimpleNamespace(
             st_mode=self._mode_with_type(entry),
             st_uid=entry["uid"], st_gid=entry["gid"], st_size=entry["size"],
+            st_dev=1, st_ino=_ino_for(path),
         )
 
     def statvfs(self, path):
@@ -470,6 +507,25 @@ class PrepareExecutionTests(unittest.TestCase):
         result = _prepare(fs)
         self.assertFalse(result["success"])
         self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_COPY_FAILED")
+
+    def test_canonical_descriptor_opened_once_and_closed_on_success(self):
+        fs = FakeExecFs()
+        result = _prepare(fs)
+        self.assertTrue(result["success"], result)
+        # Exactly one canonical descriptor was opened and it was closed; the
+        # copy read from that descriptor, never a reopened path.
+        self.assertEqual(len(fs.closed_fds), 1)
+        self.assertEqual(fs.open_fds, {})
+
+    def test_canonical_descriptor_closed_on_working_copy_failure(self):
+        fs = FakeExecFs(fail_on={"copy"})
+        result = _prepare(fs)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "TESTDISK_WORKING_COPY_COPY_FAILED")
+        # The descriptor is closed via the caller's finally even when the copy
+        # fails, so no descriptor leaks.
+        self.assertEqual(len(fs.closed_fds), 1)
+        self.assertEqual(fs.open_fds, {})
 
     def test_output_preparation_failure_refused(self):
         fs = FakeExecFs(fail_on={"mkdir"})
