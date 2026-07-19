@@ -105,3 +105,13 @@ Every workflow shall follow a logical sequence that supports safe recovery pract
 Project Sentinel shall never encourage or permit actions that contradict a previous safety assessment.
 
 Every subsequent recommendation shall remain consistent with all previous observations and decisions.
+
+⸻
+
+SL-008
+
+Do Not Operate on Mounted Source Media
+
+A source storage device that is currently mounted shall not be operated upon.
+
+While a device is mounted, the operating system may issue writes to it, endangering the integrity of the original media. The source device must be unmounted before any imaging or recovery operation continues.

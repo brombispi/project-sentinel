@@ -21,11 +21,29 @@ def _rule_protect_recovery_engine(device: Device):
     )
 
 
+def _rule_source_must_be_unmounted(device: Device):
+    """SL-008: a mounted source device must not be operated on."""
+
+    if not device.is_mounted():
+        return None
+
+    return Decision(
+        status="STOP",
+        reason="Source device is currently mounted.",
+        evidence=f"Selected device: {device.path}",
+        law="SL-008",
+        risk="CRITICAL",
+        confidence=100,
+        recommendation="Unmount the source device before continuing."
+    )
+
+
 # Ordered list of safety rules. Each rule returns a blocking Decision when its
 # law is violated, or None when it has nothing to say. Future Sentinel Laws
 # plug in here without changing the aggregation logic below.
 RULES = [
     _rule_protect_recovery_engine,
+    _rule_source_must_be_unmounted,
 ]
 
 
@@ -79,16 +97,6 @@ def evaluate(device: Device):
     recommendations.append(
         "Proceed with assessment."
     )
-
-    if device.is_mounted():
-
-        warnings.append(
-            "External device is currently mounted. Mounted filesystems may receive unintended write operations."
-        )
-
-        recommendations.append(
-            "Unmount the device before imaging or recovery whenever possible."
-        )
 
     decision = Decision(
         status="APPROVED",

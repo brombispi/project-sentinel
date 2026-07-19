@@ -51,13 +51,18 @@ class ExternalDeviceTests(unittest.TestCase):
         self.assertIsNone(decision.law)
         self.assertTrue(assessment.is_approved())
 
-    def test_mounted_external_device_is_approved_with_warning(self):
+    def test_mounted_source_device_is_stopped_under_sl_008(self):
         assessment = evaluate(_make_device(protected=False, mounted=True))
+        decision = assessment.decision
 
-        self.assertTrue(assessment.is_approved())
-        self.assertTrue(assessment.has_warnings())
-        self.assertTrue(
-            any("mounted" in warning.lower() for warning in assessment.warnings)
+        self.assertEqual(decision.status, "STOP")
+        self.assertEqual(decision.law, "SL-008")
+        self.assertEqual(decision.risk, "CRITICAL")
+        self.assertEqual(decision.reason, "Source device is currently mounted.")
+        self.assertFalse(assessment.is_approved())
+        self.assertEqual(
+            assessment.recommendations[0],
+            "Unmount the source device before continuing.",
         )
 
 
