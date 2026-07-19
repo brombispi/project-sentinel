@@ -98,6 +98,7 @@
     "aegis.reason.unidentified_source": "Die Identität des Quellgeräts ist nicht vertrauenswürdig.",
     "aegis.recommendation.unmounted_source": "Quellgerät vor dem Fortfahren aushängen.",
     "aegis.recommendation.unidentified_source": "Physisches Quellgerät prüfen und eine vertrauenswürdige Seriennummer ermitteln, bevor Sie fortfahren.",
+    "aegis.recommendation.recovery_engine": "Ein externes Kundenspeichergerät auswählen.",
 
     "oracle.label.goal": "Ziel       :",
     "oracle.label.priority": "Priorität  :",

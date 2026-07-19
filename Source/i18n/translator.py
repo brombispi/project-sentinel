@@ -406,6 +406,9 @@ def display_aegis_reason(reason):
 
 def display_aegis_recommendation(recommendation):
     mapping = {
+        "Select an external customer storage device.": (
+            "aegis.recommendation.recovery_engine"
+        ),
         "Unmount the source device before continuing.": (
             "aegis.recommendation.unmounted_source"
         ),

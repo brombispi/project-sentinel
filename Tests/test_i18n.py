@@ -360,6 +360,34 @@ class AegisDisplayTests(unittest.TestCase):
             "Seriennummer ermitteln, bevor Sie fortfahren.",
         )
 
+    def test_sl_001_recommendation_localized_en(self):
+        set_language("en", persist=False)
+        self.assertEqual(
+            display_aegis_recommendation(
+                "Select an external customer storage device."
+            ),
+            "Select an external customer storage device.",
+        )
+
+    def test_sl_001_recommendation_localized_de(self):
+        set_language("de", persist=False)
+        self.assertEqual(
+            display_aegis_recommendation(
+                "Select an external customer storage device."
+            ),
+            "Ein externes Kundenspeichergerät auswählen.",
+        )
+        self.assertEqual(
+            display_oracle_step("Select an external customer storage device."),
+            "Ein externes Kundenspeichergerät auswählen.",
+        )
+
+    def test_unknown_aegis_recommendation_falls_back_to_canonical_string(self):
+        set_language("de", persist=False)
+        unknown = "Some future AEGIS recommendation."
+        self.assertEqual(display_aegis_recommendation(unknown), unknown)
+        self.assertEqual(display_oracle_step(unknown), unknown)
+
 
 class SentinelLocalizationRegressionTests(unittest.TestCase):
     def test_confirmed_yes_accepts_localized_affirmatives(self):

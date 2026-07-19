@@ -98,6 +98,7 @@
     "aegis.reason.unidentified_source": "Source device identity cannot be trusted.",
     "aegis.recommendation.unmounted_source": "Unmount the source device before continuing.",
     "aegis.recommendation.unidentified_source": "Verify the physical source device and obtain a trustworthy serial before continuing.",
+    "aegis.recommendation.recovery_engine": "Select an external customer storage device.",
 
     "oracle.label.goal": "Goal       :",
     "oracle.label.priority": "Priority   :",
