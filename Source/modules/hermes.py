@@ -78,6 +78,7 @@ TECHNICIAN_SECTION_KEYS = (
     "report.section.intake_summary",
     "report.section.device_identity",
     "report.section.assessment_results",
+    "report.section.recovery_execution",
     "report.section.imaging_details",
     "report.section.integrity_verification",
     "report.section.recovery_statistics",
@@ -105,6 +106,7 @@ TECHNICIAN_REPORT_SECTIONS = (
     "Intake Summary",
     "Device Identity",
     "Assessment Results",
+    "Recovery Execution",
     "Imaging Details",
     "Integrity Verification",
     "Recovery Statistics",
@@ -363,6 +365,52 @@ class Hermes:
             ),
         }
 
+    def _build_recovery_execution(self, recovery_operations):
+        """
+        Present the authoritative recovery-operation execution history from
+        manifest.recovery_operations, in stored (chronological) order.
+
+        Execution history only (AP-003). This reports each recorded operation's
+        type, state, and timestamps. It never reads the filesystem, audit.log,
+        recovered artifacts, or recovery_outcome, and never infers success,
+        failure, or recovery effectiveness from any of them. Recorded facts
+        (type, state, timestamps) are rendered verbatim, exactly like the
+        assessment decision and acquisition state codes; only an absent
+        finished_at (a still-RUNNING operation) is shown through a localized
+        placeholder. No timestamps are invented.
+        """
+        if not recovery_operations:
+            return {
+                self._t("report.field.operations"): self._t(
+                    "report.placeholder.no_recovery_operations"
+                )
+            }
+
+        section = {}
+        for index, operation in enumerate(recovery_operations, start=1):
+            if not isinstance(operation, dict):
+                operation = {}
+
+            finished_at = operation.get("finished_at")
+            finished_at_display = (
+                self._t("report.placeholder.operation_not_finished")
+                if finished_at is None
+                else finished_at
+            )
+
+            label = f"{self._t('report.field.operation')} {index}"
+            section[label] = [
+                f"{self._t('report.field.operation_type')}: "
+                f"{operation.get('type')}",
+                f"{self._t('report.field.operation_state')}: "
+                f"{operation.get('state')}",
+                f"{self._t('report.field.started_at')}: "
+                f"{operation.get('started_at')}",
+                f"{self._t('report.field.finished_at')}: "
+                f"{finished_at_display}",
+            ]
+        return section
+
     def _load_acquisition_state(self):
         return classify_acquisition_state(self.session.recovery_path)
 
@@ -538,6 +586,9 @@ class Hermes:
             self._t(
                 "report.section.assessment_results"
             ): self._build_assessment_results(manifest),
+            self._t(
+                "report.section.recovery_execution"
+            ): self._build_recovery_execution(recovery_operations),
             self._t("report.section.imaging_details"): self._build_imaging_details(
                 acquisition_state
             ),

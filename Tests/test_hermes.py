@@ -2091,5 +2091,173 @@ class HermesCustomerPlaintextTests(unittest.TestCase):
             self.assertTrue(markdown.startswith("# Customer Report\n"))
 
 
+class RecoveryExecutionSectionTests(unittest.TestCase):
+    """Technician 'Recovery Execution' section renders manifest.recovery_operations
+    only: execution history (type/state/timestamps) in stored order, with no
+    filesystem, audit-log, or recovery-outcome inference (AP-003)."""
+
+    def setUp(self):
+        self._previous_language = get_language()
+        set_language("en", persist=False)
+
+    def tearDown(self):
+        set_language(self._previous_language, persist=False)
+
+    def _report(self, manifest):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, manifest)
+            return Hermes(_session(case_dir), "en").build_technician_report()
+
+    def _report_with_disk(self, manifest, populate):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, manifest)
+            populate(case_dir)
+            hermes = Hermes(_session(case_dir), "en")
+            return hermes.build_technician_report(), hermes.build_technician_markdown()
+
+    def test_section_positioned_between_assessment_and_imaging(self):
+        report = self._report(_minimal_manifest())
+        keys = list(report.keys())
+        self.assertIn("Recovery Execution", keys)
+        self.assertEqual(
+            keys.index("Recovery Execution"),
+            keys.index("Assessment Results") + 1,
+        )
+        self.assertEqual(
+            keys.index("Imaging Details"),
+            keys.index("Recovery Execution") + 1,
+        )
+
+    def test_multiple_operations_render_in_stored_order(self):
+        operations = [
+            _recovery_operation(state="INTERRUPTED"),
+            _recovery_operation(state="FAILED"),
+            _recovery_operation(state="COMPLETED"),
+        ]
+        manifest = _populated_manifest()
+        manifest["recovery_operations"] = operations
+
+        section = self._report(manifest)["Recovery Execution"]
+
+        self.assertEqual(
+            list(section.keys()),
+            ["Operation 1", "Operation 2", "Operation 3"],
+        )
+        self.assertIn("Operation State: INTERRUPTED", section["Operation 1"])
+        self.assertIn("Operation State: FAILED", section["Operation 2"])
+        self.assertIn("Operation State: COMPLETED", section["Operation 3"])
+
+    def test_every_operation_shows_all_four_fields(self):
+        manifest = _populated_manifest()
+        manifest["recovery_operations"] = [_recovery_operation(state="COMPLETED")]
+
+        section = self._report(manifest)["Recovery Execution"]
+
+        self.assertEqual(
+            section["Operation 1"],
+            [
+                "Operation Type: PHOTOREC",
+                "Operation State: COMPLETED",
+                "Started At: 2026-07-16T11:00:05",
+                "Finished At: 2026-07-16T11:42:31",
+            ],
+        )
+
+    def test_running_operation_finished_at_is_not_finished(self):
+        manifest = _populated_manifest()
+        manifest["recovery_operations"] = [_recovery_operation(state="RUNNING")]
+
+        section = self._report(manifest)["Recovery Execution"]
+
+        # started_at is a recorded fact; finished_at null becomes the localized
+        # placeholder and no timestamp is invented.
+        self.assertIn("Started At: 2026-07-16T11:00:05", section["Operation 1"])
+        self.assertIn("Finished At: Not finished", section["Operation 1"])
+        self.assertNotIn("None", " ".join(section["Operation 1"]))
+
+    def test_empty_operations_list_shows_placeholder(self):
+        section = self._report(_minimal_manifest())["Recovery Execution"]
+        self.assertEqual(
+            section, {"Operations": "No recovery operations recorded."}
+        )
+
+    def test_absent_recovery_operations_key_shows_placeholder(self):
+        manifest = _populated_manifest()
+        self.assertNotIn("recovery_operations", manifest)
+        section = self._report(manifest)["Recovery Execution"]
+        self.assertEqual(
+            section, {"Operations": "No recovery operations recorded."}
+        )
+
+    def test_customer_report_has_no_recovery_execution_section(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            manifest = _populated_manifest()
+            manifest["recovery_operations"] = [_recovery_operation()]
+            _write_manifest(case_dir, manifest)
+
+            report = Hermes(_session(case_dir), "en").build_customer_report()
+
+            self.assertNotIn("Recovery Execution", report)
+            self.assertEqual(list(report.keys()), list(CUSTOMER_REPORT_SECTIONS))
+
+    def test_no_filesystem_inference(self):
+        # Recovered artifacts on disk and no image artifacts: the section must
+        # reflect ONLY the manifest operations, never disk contents. It must not
+        # borrow recovered file/directory counts (those live in Recovery
+        # Statistics), proving no filesystem inference here.
+        manifest = _populated_manifest()
+        manifest["recovery_operations"] = [_recovery_operation(state="COMPLETED")]
+
+        report, _ = self._report_with_disk(manifest, _write_recovered_artifacts)
+        section = report["Recovery Execution"]
+
+        self.assertEqual(list(section.keys()), ["Operation 1"])
+        flattened = " ".join(section["Operation 1"])
+        self.assertNotIn("Recovered", flattened)
+        self.assertNotIn("recup", flattened)
+        # Sanity: recovered counts are still reported by their owning section.
+        self.assertEqual(report["Recovery Statistics"]["Recovered File Count"], 2)
+
+    def test_no_recovery_outcome_inference(self):
+        # A COMPLETED execution with an UNSUCCESSFUL case outcome renders the
+        # recorded execution state verbatim; execution is never equated with
+        # recovery outcome, and success is never inferred from COMPLETED.
+        manifest = _populated_manifest()
+        manifest["recovery_outcome"] = "UNSUCCESSFUL"
+        manifest["recovery_operations"] = [_recovery_operation(state="COMPLETED")]
+
+        section = self._report(manifest)["Recovery Execution"]
+        flattened = " ".join(section["Operation 1"])
+
+        self.assertIn("Operation State: COMPLETED", flattened)
+        for outcome_token in ("UNSUCCESSFUL", "SUCCESSFUL", "PARTIAL"):
+            self.assertNotIn(outcome_token, flattened)
+
+    def test_markdown_renders_recovery_execution_after_assessment(self):
+        manifest = _populated_manifest()
+        manifest["recovery_operations"] = [
+            _recovery_operation(state="COMPLETED"),
+            _recovery_operation(state="RUNNING"),
+        ]
+
+        _, markdown = self._report_with_disk(manifest, lambda case_dir: None)
+
+        self.assertIn("## Recovery Execution", markdown)
+        self.assertLess(
+            markdown.index("## Assessment Results"),
+            markdown.index("## Recovery Execution"),
+        )
+        self.assertLess(
+            markdown.index("## Recovery Execution"),
+            markdown.index("## Imaging Details"),
+        )
+        self.assertIn("Operation 1:", markdown)
+        self.assertIn("- Operation State: COMPLETED", markdown)
+        self.assertIn("- Finished At: Not finished", markdown)
+
+
 if __name__ == "__main__":
     unittest.main()

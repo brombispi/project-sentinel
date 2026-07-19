@@ -308,6 +308,73 @@ class TechnicianReportLocalizationTests(unittest.TestCase):
             "Nicht erfasst",
         )
 
+    def test_recovery_execution_section_localized_en(self):
+        report, markdown = self._report("en")
+
+        self.assertIn("## Recovery Execution", markdown)
+        section = report["Recovery Execution"]
+        self.assertEqual(
+            section["Operation 1"],
+            [
+                "Operation Type: PHOTOREC",
+                "Operation State: COMPLETED",
+                "Started At: 2026-07-16T11:00:05",
+                "Finished At: 2026-07-16T11:42:31",
+            ],
+        )
+
+    def test_recovery_execution_section_localized_de(self):
+        report, markdown = self._report("de")
+
+        self.assertIn("## Wiederherstellungsausführung", markdown)
+        section = report["Wiederherstellungsausführung"]
+        # Field labels are localized; recorded facts stay verbatim.
+        self.assertEqual(
+            section["Operation 1"],
+            [
+                "Operationstyp: PHOTOREC",
+                "Operationsstatus: COMPLETED",
+                "Gestartet am: 2026-07-16T11:00:05",
+                "Beendet am: 2026-07-16T11:42:31",
+            ],
+        )
+
+    def test_recovery_execution_not_finished_localized(self):
+        manifest = _populated_manifest()
+        manifest["recovery_operations"] = [
+            {
+                "type": "PHOTOREC",
+                "state": "RUNNING",
+                "started_at": "2026-07-16T11:00:05",
+                "finished_at": None,
+            }
+        ]
+
+        report_en, _ = self._report("en", manifest=manifest)
+        report_de, _ = self._report("de", manifest=manifest)
+
+        self.assertIn(
+            "Finished At: Not finished",
+            report_en["Recovery Execution"]["Operation 1"],
+        )
+        self.assertIn(
+            "Beendet am: Nicht beendet",
+            report_de["Wiederherstellungsausführung"]["Operation 1"],
+        )
+
+    def test_recovery_execution_empty_placeholder_localized(self):
+        report_en, _ = self._report("en", manifest=_minimal_manifest())
+        report_de, _ = self._report("de", manifest=_minimal_manifest())
+
+        self.assertEqual(
+            report_en["Recovery Execution"],
+            {"Operations": "No recovery operations recorded."},
+        )
+        self.assertEqual(
+            report_de["Wiederherstellungsausführung"],
+            {"Operationen": "Keine Wiederherstellungsoperationen erfasst."},
+        )
+
     def test_rendering_does_not_mutate_global_language(self):
         set_language("en", persist=False)
         self._report("de")
