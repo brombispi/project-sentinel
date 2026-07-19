@@ -38,12 +38,40 @@ def _rule_source_must_be_unmounted(device: Device):
     )
 
 
+def _serial_is_trustworthy(serial):
+    normalized = "" if serial is None else str(serial).strip()
+    if not normalized:
+        return False
+    return normalized.lower() not in ("unknown", "n/a")
+
+
+def _rule_device_must_be_identified(device: Device):
+    """SL-003: unknown devices shall never be acted upon."""
+
+    if _serial_is_trustworthy(device.serial):
+        return None
+
+    return Decision(
+        status="STOP",
+        reason="Source device identity cannot be trusted.",
+        evidence=f"Selected device: {device.path}",
+        law="SL-003",
+        risk="CRITICAL",
+        confidence=100,
+        recommendation=(
+            "Verify the physical source device and obtain a trustworthy "
+            "serial before continuing."
+        ),
+    )
+
+
 # Ordered list of safety rules. Each rule returns a blocking Decision when its
 # law is violated, or None when it has nothing to say. Future Sentinel Laws
 # plug in here without changing the aggregation logic below.
 RULES = [
     _rule_protect_recovery_engine,
     _rule_source_must_be_unmounted,
+    _rule_device_must_be_identified,
 ]
 
 
