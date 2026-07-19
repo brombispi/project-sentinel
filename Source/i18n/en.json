@@ -92,6 +92,8 @@
 
     "aegis.label.decision": "Decision   :",
     "aegis.label.reason": "Reason     :",
+    "aegis.label.risk": "Risk       :",
+    "aegis.label.confidence": "Confidence :",
     "aegis.reason.recovery_engine": "Target is the Recovery Engine.",
     "aegis.reason.external_device": "External device.",
     "aegis.reason.mounted_source": "Source device is currently mounted.",

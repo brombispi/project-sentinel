@@ -388,6 +388,92 @@ class AegisDisplayTests(unittest.TestCase):
         self.assertEqual(display_aegis_recommendation(unknown), unknown)
         self.assertEqual(display_oracle_step(unknown), unknown)
 
+    def test_risk_and_confidence_label_keys_present_en_and_de(self):
+        # SL-005: the AEGIS risk and confidence labels must resolve in both
+        # language packs (a missing key would render as "[aegis.label.risk]").
+        for language in ("en", "de"):
+            with self.subTest(language=language):
+                set_language(language, persist=False)
+                self.assertFalse(tr("aegis.label.risk").startswith("["))
+                self.assertFalse(tr("aegis.label.confidence").startswith("["))
+
+
+class AegisAssessmentContextDisplayTests(unittest.TestCase):
+    """SL-005: risk and confidence must be shown in the AEGIS assessment
+    display, reusing the values already carried on the Decision object."""
+
+    def setUp(self):
+        self._env_patch = mock.patch.dict(os.environ, {}, clear=True)
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        init_language(SOURCE_ROOT)
+
+    def _run_context(self, language):
+        set_language(language, persist=False)
+
+        printed = []
+        namespace = {
+            "tr": tr,
+            "print": lambda *args: printed.append(
+                " ".join(str(arg) for arg in args)
+            ),
+            "Codex": mock.Mock(
+                return_value=mock.Mock(lookup=mock.Mock(return_value=None))
+            ),
+            "display_aegis_reason": display_aegis_reason,
+            "_operator_oracle_goal": lambda goal: goal,
+            "_operator_oracle_step": lambda step: step,
+        }
+        context = _load_sentinel_function(
+            "_print_assessment_context", namespace
+        )
+
+        device = mock.Mock()
+        device.path = "/dev/sdb"
+        device.model = "ACME Portable"
+        device.serial = "SER123"
+        device.filesystem = "ntfs"
+        device.role = "source"
+
+        decision = mock.Mock()
+        decision.status = "APPROVED"
+        decision.reason = "External device."
+        decision.risk = "LOW"
+        decision.confidence = 100
+
+        assessment = mock.Mock()
+        assessment.decision = decision
+
+        strategy = mock.Mock()
+        strategy.goal = "oracle.goal.preserve_device"
+        strategy.priority = "HIGH"
+        strategy.steps = ()
+
+        context(device, assessment, strategy)
+        return "\n".join(printed)
+
+    def test_risk_and_confidence_displayed_en(self):
+        output = self._run_context("en")
+        self.assertIn("Risk", output)
+        self.assertIn("LOW", output)
+        self.assertIn("Confidence", output)
+        self.assertIn("100%", output)
+
+    def test_risk_and_confidence_displayed_de(self):
+        output = self._run_context("de")
+        self.assertIn("Risiko", output)
+        self.assertIn("LOW", output)
+        self.assertIn("Vertrauen", output)
+        self.assertIn("100%", output)
+
+    def test_existing_decision_and_reason_order_preserved(self):
+        output = self._run_context("en")
+        self.assertLess(output.index("Decision"), output.index("Reason"))
+        self.assertLess(output.index("Reason"), output.index("Risk"))
+        self.assertLess(output.index("Risk"), output.index("Confidence"))
+
 
 class SentinelLocalizationRegressionTests(unittest.TestCase):
     def test_confirmed_yes_accepts_localized_affirmatives(self):

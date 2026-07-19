@@ -751,6 +751,11 @@ def _print_assessment_context(source_device, assessment, strategy):
         tr("aegis.label.reason"),
         display_aegis_reason(assessment.decision.reason),
     )
+    print(tr("aegis.label.risk"), assessment.decision.risk)
+    print(
+        tr("aegis.label.confidence"),
+        f"{assessment.decision.confidence}%",
+    )
 
     print()
     print(tr("assessment.section.oracle"))
