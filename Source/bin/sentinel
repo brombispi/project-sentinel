@@ -1168,6 +1168,17 @@ def _refresh_assessment_on_resume(session, assessment, intake):
     fresh = evaluate(session.source_device)
     session.assessment = fresh
 
+    # Self-contained, machine-readable AEGIS audit event carrying the decision's
+    # persisted forensic context. Values are read verbatim from the Decision;
+    # nothing is recomputed. Missing law uses the stable NOT_RECORDED sentinel.
+    decision_event = (
+        f"Decision: {fresh.decision.status} | "
+        f"law={fresh.decision.law or 'NOT_RECORDED'} | "
+        f"risk={fresh.decision.risk} | "
+        f"confidence={fresh.decision.confidence} | "
+        f"reason={fresh.decision.reason}"
+    )
+
     if fresh.decision.status == "STOP":
         update_status(
             session,
@@ -1200,14 +1211,14 @@ def _refresh_assessment_on_resume(session, assessment, intake):
         log_warning(
             session,
             "AEGIS",
-            f"Decision: STOP ({fresh.decision.reason})",
+            decision_event,
         )
         return fresh, True
 
     log_info(
         session,
         "AEGIS",
-        f"Decision: {fresh.decision.status}",
+        decision_event,
     )
     return fresh, False
 
@@ -1260,6 +1271,17 @@ def _run_assessment_pipeline(session, intake, devices):
 
     _print_assessment_context(source_device, assessment, strategy)
 
+    # Self-contained, machine-readable AEGIS audit event carrying the decision's
+    # persisted forensic context. Values are read verbatim from the Decision;
+    # nothing is recomputed. Missing law uses the stable NOT_RECORDED sentinel.
+    decision_event = (
+        f"Decision: {assessment.decision.status} | "
+        f"law={assessment.decision.law or 'NOT_RECORDED'} | "
+        f"risk={assessment.decision.risk} | "
+        f"confidence={assessment.decision.confidence} | "
+        f"reason={assessment.decision.reason}"
+    )
+
     if assessment.decision.status == "STOP":
         update_status(
             session,
@@ -1272,14 +1294,14 @@ def _run_assessment_pipeline(session, intake, devices):
         log_warning(
             session,
             "AEGIS",
-            f"Decision: STOP ({assessment.decision.reason})",
+            decision_event,
         )
         return strategy, smart_result, workflow_results
 
     log_info(
         session,
         "AEGIS",
-        f"Decision: {assessment.decision.status}",
+        decision_event,
     )
 
     smart_output_path = (

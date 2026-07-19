@@ -1071,6 +1071,29 @@ class HermesTests(unittest.TestCase):
                 list(AUDIT_LOG_LINES),
             )
 
+    def test_audit_timeline_displays_enriched_aegis_lines_verbatim(self):
+        # HERMES treats audit lines as raw text, so the enriched, pipe-delimited
+        # AEGIS decision events pass through unchanged and untranslated.
+        enriched_lines = (
+            "2026-07-19T15:47:05+00:00 [AEGIS][WARNING] Decision: STOP | "
+            "law=SL-003 | risk=CRITICAL | confidence=100 | "
+            "reason=Source device identity cannot be trusted.",
+            "2026-07-19T15:52:10+00:00 [AEGIS][INFO] Decision: APPROVED | "
+            "law=NOT_RECORDED | risk=LOW | confidence=100 | "
+            "reason=External device.",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, _minimal_manifest())
+            _write_audit_log(case_dir, enriched_lines)
+
+            report = Hermes(_session(case_dir)).build_technician_report()
+
+            self.assertEqual(
+                report["Audit Timeline"]["Events"],
+                list(enriched_lines),
+            )
+
     def test_audit_timeline_displays_utc_iso8601_lines_verbatim(self):
         # HERMES treats audit lines as raw text, so the new timezone-aware UTC
         # ISO 8601 timestamps pass through unchanged and untranslated.

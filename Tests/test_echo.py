@@ -85,6 +85,25 @@ class UtcTimestampFormatTests(unittest.TestCase):
         self.assertEqual(match.group("level"), "INFO")
         self.assertEqual(match.group("event"), "Forensic imaging completed.")
 
+    def test_enriched_pipe_delimited_event_preserves_utc_line_structure(self):
+        # The enriched AEGIS event uses " | field=value" segments; ECHO must
+        # still produce a valid UTC line and keep the event text verbatim.
+        enriched = (
+            "Decision: STOP | law=SL-003 | risk=CRITICAL | confidence=100 | "
+            "reason=Source device identity cannot be trusted."
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = _FakeSession(temp_dir)
+            log_event(session, "AEGIS", "WARNING", enriched)
+            lines = read_audit_log(temp_dir)
+
+        self.assertEqual(len(lines), 1)
+        match = UTC_TIMESTAMP_LINE.match(lines[0])
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group("module"), "AEGIS")
+        self.assertEqual(match.group("level"), "WARNING")
+        self.assertEqual(match.group("event"), enriched)
+
     def test_append_preserves_prior_content_with_utc_line(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session = _FakeSession(temp_dir)

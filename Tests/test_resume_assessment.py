@@ -293,6 +293,129 @@ class RouteCaseResumeAssessmentTests(unittest.TestCase):
         namespace["_run_recovery_method_selection"].assert_called_once()
 
 
+class AegisDecisionAuditEventTests(unittest.TestCase):
+    """SL-004: the AEGIS case-decision audit event is self-contained, carrying
+    the decision's persisted forensic context (law, risk, confidence, reason)
+    read verbatim from the Decision object via the real resume call site."""
+
+    def _captured_aegis_event(self, device):
+        captured = {}
+
+        def _record(session, module, event):
+            if module == "AEGIS":
+                captured["event"] = event
+
+        namespace = {
+            "evaluate": evaluate,
+            "update_status": mock.Mock(),
+            "RecoveryStatus": _recovery_status(),
+            "create_strategy": mock.Mock(return_value=mock.Mock()),
+            "log_info": _record,
+            "log_warning": _record,
+            "_print_assessment_context": mock.Mock(),
+        }
+        refresh = _load_sentinel_function(
+            "_refresh_assessment_on_resume",
+            namespace,
+        )
+
+        session = mock.Mock()
+        session.source_device = device
+        refresh(session, mock.Mock(), {"intake": {}})
+        return captured["event"]
+
+    def test_stop_event_contains_all_fields(self):
+        event = self._captured_aegis_event(_make_device(serial="Unknown"))
+        self.assertIn("Decision: STOP", event)
+        self.assertIn("law=SL-003", event)
+        self.assertIn("risk=CRITICAL", event)
+        self.assertIn("confidence=100", event)
+        self.assertIn(
+            "reason=Source device identity cannot be trusted.",
+            event,
+        )
+
+    def test_sl_008_law_code_untranslated(self):
+        event = self._captured_aegis_event(_make_device(mounted=True))
+        self.assertIn("Decision: STOP", event)
+        self.assertIn("law=SL-008", event)
+
+    def test_non_stop_event_contains_all_fields(self):
+        event = self._captured_aegis_event(_make_device(serial="SAFE-SERIAL-1"))
+        self.assertIn("Decision: APPROVED", event)
+        self.assertIn("law=NOT_RECORDED", event)
+        self.assertIn("risk=LOW", event)
+        self.assertIn("confidence=100", event)
+        self.assertIn("reason=External device.", event)
+
+    def test_missing_law_uses_stable_sentinel(self):
+        event = self._captured_aegis_event(_make_device(serial="SAFE-SERIAL-2"))
+        self.assertIn("law=NOT_RECORDED", event)
+        # Never leak Python None into the audit trail.
+        self.assertNotIn("law=None", event)
+
+    def test_risk_and_confidence_come_from_decision_object(self):
+        device = _make_device(serial="Unknown")
+        decision = evaluate(device).decision
+        event = self._captured_aegis_event(device)
+        self.assertIn(f"risk={decision.risk}", event)
+        self.assertIn(f"confidence={decision.confidence}", event)
+
+    def _captured_pipeline_stop_event(self, device):
+        captured = {}
+
+        def _record(session, module, event):
+            if module == "AEGIS":
+                captured["event"] = event
+
+        namespace = {
+            "print_device_selection_list": mock.Mock(),
+            "select_source_device": mock.Mock(),
+            "evaluate": evaluate,
+            "create_strategy": mock.Mock(return_value=mock.Mock()),
+            "log_info": _record,
+            "log_warning": _record,
+            "_print_assessment_context": mock.Mock(),
+            "RecoveryStatus": _recovery_status(),
+            "update_status": mock.Mock(),
+        }
+        pipeline = _load_sentinel_function("_run_assessment_pipeline", namespace)
+
+        session = mock.Mock()
+        session.source_device = device
+        session.assessment = evaluate(device)
+        pipeline(session, {"intake": {}}, [])
+        return captured["event"]
+
+    def test_pipeline_stop_event_contains_all_fields(self):
+        # Behavioural proof for the second call site: execute the real
+        # _run_assessment_pipeline STOP branch and capture its emitted event.
+        event = self._captured_pipeline_stop_event(_make_device(mounted=True))
+        self.assertIn("Decision: STOP", event)
+        self.assertIn("law=SL-008", event)
+        self.assertIn("risk=CRITICAL", event)
+        self.assertIn("confidence=100", event)
+        self.assertIn(
+            "reason=Source device is currently mounted.",
+            event,
+        )
+
+    def test_both_call_sites_are_enriched(self):
+        # Guard both production AEGIS decision log sites (resume + new-case
+        # pipeline) against silent regression to the old status-only event.
+        for function_name in (
+            "_refresh_assessment_on_resume",
+            "_run_assessment_pipeline",
+        ):
+            source = _extract_sentinel_function(function_name)
+            with self.subTest(function=function_name):
+                self.assertIn("law=", source)
+                self.assertIn("risk=", source)
+                self.assertIn("confidence=", source)
+                self.assertIn("reason=", source)
+                self.assertIn("NOT_RECORDED", source)
+
+
 class NewCaseAssessmentPipelineTests(unittest.TestCase):
     def test_new_case_path_does_not_use_resume_refresh(self):
         new_case_source = _extract_sentinel_function("_run_new_case")
