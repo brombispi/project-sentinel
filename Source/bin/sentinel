@@ -1150,6 +1150,61 @@ def _run_acquisition_workflow(session, devices, assessment, intake):
     }
 
 
+def _refresh_assessment_on_resume(session, assessment, intake):
+    """
+    Re-run AEGIS against the re-identified source device on case resume.
+
+    Persisted assessments from case.json are not trusted (SL-007).
+    Returns (assessment, stopped).
+    """
+
+    fresh = evaluate(session.source_device)
+    session.assessment = fresh
+
+    if fresh.decision.status == "STOP":
+        update_status(
+            session,
+            RecoveryStatus.ON_HOLD,
+            session.source_device,
+            fresh,
+            intake=intake,
+        )
+
+        strategy = create_strategy(fresh)
+
+        log_info(
+            session,
+            "ORACLE",
+            f"Strategy generated: {strategy.status} / {strategy.priority}",
+        )
+
+        log_info(
+            session,
+            "CODEX",
+            f"Knowledge applied for: {session.source_device.filesystem}",
+        )
+
+        _print_assessment_context(
+            session.source_device,
+            fresh,
+            strategy,
+        )
+
+        log_warning(
+            session,
+            "AEGIS",
+            f"Decision: STOP ({fresh.decision.reason})",
+        )
+        return fresh, True
+
+    log_info(
+        session,
+        "AEGIS",
+        f"Decision: {fresh.decision.status}",
+    )
+    return fresh, False
+
+
 def _run_assessment_pipeline(session, intake, devices):
     smart_result = None
     workflow_results = {
@@ -1759,6 +1814,15 @@ def route_case(
 
     status = session.status
 
+    if session.source_device and status != RecoveryStatus.COMPLETED:
+        assessment, stopped = _refresh_assessment_on_resume(
+            session,
+            assessment,
+            intake,
+        )
+        if stopped:
+            return
+
     if status == RecoveryStatus.COMPLETED:
         _run_delivery_workflow(
             session,
@@ -1804,6 +1868,14 @@ def route_case(
             )
             print()
             print(tr("error.source_missing"))
+            return
+
+        assessment, stopped = _refresh_assessment_on_resume(
+            session,
+            assessment,
+            intake,
+        )
+        if stopped:
             return
 
         update_status(

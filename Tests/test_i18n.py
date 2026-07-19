@@ -988,6 +988,9 @@ class RouteCaseFinalizedTests(unittest.TestCase):
             "collect_case_intake": mock.Mock(),
             "_run_assessment_pipeline": mock.Mock(),
             "_finish_session": mock.Mock(),
+            "_refresh_assessment_on_resume": mock.Mock(
+                side_effect=lambda session, assessment, intake: (assessment, False),
+            ),
             "classify_acquisition_state": mock.Mock(),
             "create_strategy": mock.Mock(return_value=mock.Mock()),
             "_run_acquisition_workflow": mock.Mock(),
