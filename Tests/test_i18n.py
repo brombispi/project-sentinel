@@ -370,10 +370,15 @@ class CaseLoaderCodeTests(unittest.TestCase):
 
 
 class DeliveryWorkflowTests(unittest.TestCase):
-    TECHNICIAN_PATH = Path("/tmp/recovery/reports/technician_report.md")
-    CUSTOMER_PATH = Path("/tmp/recovery/reports/customer_report.md")
+    TECHNICIAN_PATH = Path("/tmp/recovery/reports/technician_report.en.md")
+    CUSTOMER_PLAINTEXT_PATH = Path(
+        "/tmp/recovery/reports/customer_report.en.txt"
+    )
 
-    def _load_delivery_function(self):
+    def _load_delivery_function(self, *, manifest_status="COMPLETED"):
+        from core.status import RecoveryStatus
+        from modules.hermes import CustomerReportNotCompletedError
+        from modules.manifest import ManifestError
         from modules.pdf_report_formatter import PdfReportError
 
         namespace = {
@@ -384,16 +389,19 @@ class DeliveryWorkflowTests(unittest.TestCase):
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
             "PdfReportError": PdfReportError,
-            # The per-report language and format prompts are exercised
-            # independently in test_report_localization.py and
-            # test_pdf_report_export.py; here they are mocked (format defaults
-            # to Markdown) so these tests focus on the generate/decline offer
-            # flow and stay decoupled from language and format selection.
+            "CustomerReportNotCompletedError": CustomerReportNotCompletedError,
+            "ManifestError": ManifestError,
+            "RecoveryStatus": RecoveryStatus,
+            "read_case_manifest": mock.Mock(
+                return_value={"status": manifest_status}
+            ),
             "_prompt_report_language": mock.Mock(return_value="en"),
             "_prompt_report_format": mock.Mock(return_value="markdown"),
+            "_prompt_customer_report_format": mock.Mock(return_value="plaintext"),
         }
         _load_sentinel_function("_save_report_format", namespace)
         _load_sentinel_function("_offer_report_generation", namespace)
+        _load_sentinel_function("_offer_customer_report_generation", namespace)
         delivery = _load_sentinel_function(
             "_run_delivery_workflow",
             namespace,
@@ -401,6 +409,7 @@ class DeliveryWorkflowTests(unittest.TestCase):
         return delivery, namespace
 
     def _call_delivery(self, delivery, namespace, session, recovery_result):
+        session.recovery_path = "/tmp/recovery"
         delivery(
             session,
             mock.Mock(),
@@ -411,15 +420,37 @@ class DeliveryWorkflowTests(unittest.TestCase):
     def _log_messages(self, namespace):
         return [call.args[2] for call in namespace["log_info"].call_args_list]
 
-    def test_skips_prompt_when_recovery_not_successful(self):
-        delivery, namespace = self._load_delivery_function()
+    def test_skips_prompt_when_case_not_completed(self):
+        delivery, namespace = self._load_delivery_function(
+            manifest_status="READY_FOR_RECOVERY"
+        )
         session = mock.Mock()
 
-        for recovery_result in (None, {"success": False}):
-            with self.subTest(recovery_result=recovery_result):
-                namespace["input"].reset_mock()
-                self._call_delivery(delivery, namespace, session, recovery_result)
-                namespace["input"].assert_not_called()
+        self._call_delivery(delivery, namespace, session, {"success": True})
+        namespace["input"].assert_not_called()
+
+    def test_offers_reports_when_completed_despite_recovery_result_none(self):
+        delivery, namespace = self._load_delivery_function()
+        session = mock.Mock()
+        namespace["input"].side_effect = ["n", "n"]
+
+        self._call_delivery(delivery, namespace, session, None)
+
+        self.assertEqual(namespace["input"].call_count, 2)
+
+    def test_offers_reports_when_completed_despite_unsuccessful_recovery(self):
+        delivery, namespace = self._load_delivery_function()
+        session = mock.Mock()
+        namespace["input"].side_effect = ["n", "n"]
+
+        self._call_delivery(
+            delivery,
+            namespace,
+            session,
+            {"success": False},
+        )
+
+        self.assertEqual(namespace["input"].call_count, 2)
 
     def test_both_declined_generate_no_report_but_offer_both(self):
         delivery, namespace = self._load_delivery_function()
@@ -444,7 +475,7 @@ class DeliveryWorkflowTests(unittest.TestCase):
 
         self.assertEqual(namespace["input"].call_count, 2)
         hermes.save_technician_report.assert_called_once_with()
-        hermes.save_customer_report.assert_not_called()
+        hermes.save_customer_plaintext.assert_not_called()
         namespace["log_info"].assert_called_once_with(
             session,
             "HERMES",
@@ -456,16 +487,16 @@ class DeliveryWorkflowTests(unittest.TestCase):
         session = mock.Mock()
         namespace["input"].side_effect = ["n", "y"]
         hermes = namespace["Hermes"].return_value
-        hermes.save_customer_report.return_value = self.CUSTOMER_PATH
+        hermes.save_customer_plaintext.return_value = self.CUSTOMER_PLAINTEXT_PATH
 
         self._call_delivery(delivery, namespace, session, {"success": True})
 
         hermes.save_technician_report.assert_not_called()
-        hermes.save_customer_report.assert_called_once_with()
+        hermes.save_customer_plaintext.assert_called_once_with()
         namespace["log_info"].assert_called_once_with(
             session,
             "HERMES",
-            f"Customer report saved: {self.CUSTOMER_PATH}",
+            f"Customer plain-text report saved: {self.CUSTOMER_PLAINTEXT_PATH}",
         )
 
     def test_both_accepted_saves_and_logs_both(self):
@@ -474,17 +505,17 @@ class DeliveryWorkflowTests(unittest.TestCase):
         namespace["input"].side_effect = ["y", "y"]
         hermes = namespace["Hermes"].return_value
         hermes.save_technician_report.return_value = self.TECHNICIAN_PATH
-        hermes.save_customer_report.return_value = self.CUSTOMER_PATH
+        hermes.save_customer_plaintext.return_value = self.CUSTOMER_PLAINTEXT_PATH
 
         self._call_delivery(delivery, namespace, session, {"success": True})
 
         hermes.save_technician_report.assert_called_once_with()
-        hermes.save_customer_report.assert_called_once_with()
+        hermes.save_customer_plaintext.assert_called_once_with()
         self.assertEqual(
             self._log_messages(namespace),
             [
                 f"Technician report saved: {self.TECHNICIAN_PATH}",
-                f"Customer report saved: {self.CUSTOMER_PATH}",
+                f"Customer plain-text report saved: {self.CUSTOMER_PLAINTEXT_PATH}",
             ],
         )
 
@@ -495,20 +526,20 @@ class DeliveryWorkflowTests(unittest.TestCase):
         hermes = namespace["Hermes"].return_value
         hermes.save_technician_report.side_effect = FileExistsError(
             "Technician report already exists: "
-            "/tmp/recovery/reports/technician_report.md"
+            "/tmp/recovery/reports/technician_report.en.md"
         )
-        hermes.save_customer_report.return_value = self.CUSTOMER_PATH
+        hermes.save_customer_plaintext.return_value = self.CUSTOMER_PLAINTEXT_PATH
 
         self._call_delivery(delivery, namespace, session, {"success": True})
 
         # Overwrite refusal on the technician report must not abort the
         # customer report offer.
         namespace["print"].assert_called()
-        hermes.save_customer_report.assert_called_once_with()
+        hermes.save_customer_plaintext.assert_called_once_with()
         namespace["log_info"].assert_called_once_with(
             session,
             "HERMES",
-            f"Customer report saved: {self.CUSTOMER_PATH}",
+            f"Customer plain-text report saved: {self.CUSTOMER_PLAINTEXT_PATH}",
         )
 
     def test_customer_overwrite_refusal_displays_error_and_continues(self):
@@ -516,9 +547,9 @@ class DeliveryWorkflowTests(unittest.TestCase):
         session = mock.Mock()
         namespace["input"].side_effect = ["n", "y"]
         hermes = namespace["Hermes"].return_value
-        hermes.save_customer_report.side_effect = FileExistsError(
+        hermes.save_customer_plaintext.side_effect = FileExistsError(
             "Customer report already exists: "
-            "/tmp/recovery/reports/customer_report.md"
+            "/tmp/recovery/reports/customer_report.en.txt"
         )
 
         self._call_delivery(delivery, namespace, session, {"success": True})
@@ -533,8 +564,8 @@ class DeliveryWorkflowTests(unittest.TestCase):
             "Generate Customer Report? [y/N]:",
         )
         self.assertEqual(
-            tr("report.label.saved_path_customer", path="/x"),
-            "Customer report saved: /x",
+            tr("report.label.saved_path_customer_plaintext", path="/x"),
+            "Customer plain-text report saved: /x",
         )
 
         set_language("de", persist=False)
@@ -543,9 +574,134 @@ class DeliveryWorkflowTests(unittest.TestCase):
             "Kundenbericht erstellen? [j/N]:",
         )
         self.assertEqual(
-            tr("report.label.saved_path_customer", path="/x"),
-            "Kundenbericht gespeichert: /x",
+            tr("report.label.saved_path_customer_plaintext", path="/x"),
+            "Kundenbericht als Klartext gespeichert: /x",
         )
+
+
+class SaveReportFormatErrorHandlingTests(unittest.TestCase):
+    def setUp(self):
+        self._previous_language = get_language()
+
+    def tearDown(self):
+        set_language(self._previous_language, persist=False)
+
+    def _load_save_report_format(self):
+        from modules.hermes import CustomerReportNotCompletedError
+        from modules.manifest import ManifestError
+        from modules.pdf_report_formatter import PdfReportError
+
+        namespace = {
+            "tr": tr,
+            "print": mock.Mock(),
+            "log_info": mock.Mock(),
+            "PdfReportError": PdfReportError,
+            "CustomerReportNotCompletedError": CustomerReportNotCompletedError,
+            "ManifestError": ManifestError,
+        }
+        save_report_format = _load_sentinel_function(
+            "_save_report_format",
+            namespace,
+        )
+        return save_report_format, namespace
+
+    def _call_save_report_format(self, save_report_format, namespace, save_report):
+        save_report_format(
+            mock.Mock(),
+            save_report,
+            "en",
+            "report.label.saved_path_customer_plaintext",
+            "Customer plain-text report saved",
+        )
+
+    def test_customer_not_completed_prints_localized_message_en(self):
+        from modules.hermes import CustomerReportNotCompletedError
+
+        set_language("en", persist=False)
+        save_report_format, namespace = self._load_save_report_format()
+        save_report = mock.Mock(
+            side_effect=CustomerReportNotCompletedError(
+                "Customer report generation requires a COMPLETED case."
+            )
+        )
+
+        self._call_save_report_format(save_report_format, namespace, save_report)
+
+        namespace["print"].assert_any_call(
+            "Customer report generation requires a completed case."
+        )
+        namespace["log_info"].assert_not_called()
+
+    def test_customer_not_completed_prints_localized_message_de(self):
+        from modules.hermes import CustomerReportNotCompletedError
+
+        set_language("de", persist=False)
+        save_report_format, namespace = self._load_save_report_format()
+        save_report = mock.Mock(
+            side_effect=CustomerReportNotCompletedError(
+                "Customer report generation requires a COMPLETED case."
+            )
+        )
+
+        self._call_save_report_format(save_report_format, namespace, save_report)
+
+        namespace["print"].assert_any_call(
+            "Die Erstellung eines Kundenberichts erfordert einen abgeschlossenen Fall."
+        )
+        namespace["log_info"].assert_not_called()
+
+    def test_manifest_read_failure_prints_localized_message_en(self):
+        from modules.manifest import ManifestError
+
+        set_language("en", persist=False)
+        save_report_format, namespace = self._load_save_report_format()
+        save_report = mock.Mock(
+            side_effect=ManifestError(
+                "Existing case manifest could not be read: /secret/path/case.json"
+            )
+        )
+
+        self._call_save_report_format(save_report_format, namespace, save_report)
+
+        namespace["print"].assert_any_call(
+            "Customer report generation failed: case manifest could not be read."
+        )
+        printed_messages = [
+            call.args[0]
+            for call in namespace["print"].call_args_list
+            if call.args
+        ]
+        self.assertFalse(
+            any("/secret/path/case.json" in message for message in printed_messages)
+        )
+        namespace["log_info"].assert_not_called()
+
+    def test_manifest_read_failure_prints_localized_message_de(self):
+        from modules.manifest import ManifestError
+
+        set_language("de", persist=False)
+        save_report_format, namespace = self._load_save_report_format()
+        save_report = mock.Mock(
+            side_effect=ManifestError(
+                "Existing case manifest could not be read: /secret/path/case.json"
+            )
+        )
+
+        self._call_save_report_format(save_report_format, namespace, save_report)
+
+        namespace["print"].assert_any_call(
+            "Kundenbericht konnte nicht erstellt werden: "
+            "Fallmanifest konnte nicht gelesen werden."
+        )
+        printed_messages = [
+            call.args[0]
+            for call in namespace["print"].call_args_list
+            if call.args
+        ]
+        self.assertFalse(
+            any("/secret/path/case.json" in message for message in printed_messages)
+        )
+        namespace["log_info"].assert_not_called()
 
 
 class FinalizeRecoveryOfferTests(unittest.TestCase):

@@ -275,6 +275,16 @@
     "report.format.option.both": "[3] Both",
     "report.format.prompt.select": "Select report format [1-3, Enter for {default}]:",
 
+    "report.format.customer.prompt.title": "SELECT CUSTOMER REPORT FORMAT",
+    "report.format.customer.option.plaintext": "[1] Plain text",
+    "report.format.customer.option.pdf": "[2] PDF",
+    "report.format.customer.option.both": "[3] Both",
+    "report.format.customer.default": "Plain text",
+    "report.format.customer.prompt.select": "Select customer report format [1-3, Enter for {default}]:",
+    "report.label.saved_path_customer_plaintext": "Customer plain-text report saved: {path}",
+    "report.error.customer_not_completed": "Customer report generation requires a completed case.",
+    "report.error.manifest_read_failed": "Customer report generation failed: case manifest could not be read.",
+
     "report.pdf.label.saved_path": "Technician report PDF saved: {path}",
     "report.pdf.label.saved_path_customer": "Customer report PDF saved: {path}",
     "report.pdf.error.dependency": "PDF export is unavailable: the ReportLab library is not installed.",

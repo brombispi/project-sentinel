@@ -48,3 +48,40 @@ class ReportFormatter:
             lines.pop()
 
         return "\n".join(lines)
+
+    def format_plaintext(self, title: str, report: dict, *, section_order=()) -> str:
+        """
+        Format a sectioned report dictionary as plain text.
+
+        Uses the same section and field structure as format_markdown but
+        without Markdown heading markers.
+        """
+        lines = [
+            title,
+            "",
+        ]
+
+        if section_order:
+            sections = section_order
+        else:
+            sections = report.keys()
+
+        for section_title in sections:
+            fields = report.get(section_title, {})
+            lines.append(section_title)
+            lines.append("")
+
+            for key, value in fields.items():
+                if isinstance(value, (list, tuple)):
+                    lines.append(f"{key}:")
+                    for item in value:
+                        lines.append(f"- {item}")
+                else:
+                    lines.append(f"{key}: {value}")
+
+            lines.append("")
+
+        if lines[-1] == "":
+            lines.pop()
+
+        return "\n".join(lines)

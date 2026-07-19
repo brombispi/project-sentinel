@@ -275,6 +275,16 @@
     "report.format.option.both": "[3] Beide",
     "report.format.prompt.select": "Berichtsformat wählen [1-3, Eingabetaste für {default}]:",
 
+    "report.format.customer.prompt.title": "KUNDENBERICHTSFORMAT WÄHLEN",
+    "report.format.customer.option.plaintext": "[1] Klartext",
+    "report.format.customer.option.pdf": "[2] PDF",
+    "report.format.customer.option.both": "[3] Beide",
+    "report.format.customer.default": "Klartext",
+    "report.format.customer.prompt.select": "Kundenberichtsformat wählen [1-3, Eingabetaste für {default}]:",
+    "report.label.saved_path_customer_plaintext": "Kundenbericht als Klartext gespeichert: {path}",
+    "report.error.customer_not_completed": "Die Erstellung eines Kundenberichts erfordert einen abgeschlossenen Fall.",
+    "report.error.manifest_read_failed": "Kundenbericht konnte nicht erstellt werden: Fallmanifest konnte nicht gelesen werden.",
+
     "report.pdf.label.saved_path": "Technikerbericht als PDF gespeichert: {path}",
     "report.pdf.label.saved_path_customer": "Kundenbericht als PDF gespeichert: {path}",
     "report.pdf.error.dependency": "PDF-Export nicht verfügbar: Die Bibliothek ReportLab ist nicht installiert.",

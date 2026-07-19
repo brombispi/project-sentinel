@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core.session import RecoverySession
+from core.status import RecoveryStatus
 from i18n import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, get_language, translate
 from modules.archive import (
     IMAGE_FILENAME,
@@ -51,6 +52,11 @@ def technician_report_filename(language):
 def customer_report_filename(language):
     """Language-qualified customer report filename, e.g. customer_report.de.md."""
     return f"{CUSTOMER_REPORT_FILENAME_STEM}.{language}.md"
+
+
+def customer_report_plaintext_filename(language):
+    """Language-qualified customer plain-text filename, e.g. customer_report.de.txt."""
+    return f"{CUSTOMER_REPORT_FILENAME_STEM}.{language}.txt"
 
 
 def technician_report_pdf_filename(language):
@@ -130,6 +136,14 @@ CUSTOMER_DISCLAIMER_COUNT = 4
 CUSTOMER_POLICY_VERSION = "1.0"
 
 
+class HermesReportError(Exception):
+    """Raised when HERMES cannot produce a report artifact."""
+
+
+class CustomerReportNotCompletedError(HermesReportError):
+    """Customer report file generation refused because the case is not COMPLETED."""
+
+
 def _coerce_display_value(value):
     if value is None:
         return None
@@ -207,6 +221,14 @@ class Hermes:
 
     def _load_manifest(self):
         return read_case_manifest(Path(self.session.recovery_path))
+
+    def _require_completed_for_customer_save(self):
+        manifest = self._load_manifest()
+        if manifest.get("status") != RecoveryStatus.COMPLETED:
+            raise CustomerReportNotCompletedError(
+                "Customer report generation requires a COMPLETED case."
+            )
+        return manifest
 
     def _case_name(self):
         """Recorded case name (a case fact, never translated) for the PDF title
@@ -789,15 +811,56 @@ class Hermes:
             section_order=tuple(report.keys()),
         )
 
+    def build_customer_plaintext(self):
+        """
+        Build a plain-text representation of the customer report.
+        """
+        report = self.build_customer_report()
+        return ReportFormatter().format_plaintext(
+            self._t("report.title.customer"),
+            report,
+            section_order=tuple(report.keys()),
+        )
+
+    def save_customer_plaintext(self) -> Path:
+        """
+        Write the customer report as plain text into the case reports directory.
+
+        Creates the reports directory when it does not exist. The filename is
+        language-qualified (e.g. customer_report.en.txt). Raises
+        CustomerReportNotCompletedError when the persisted case is not
+        COMPLETED. Raises FileExistsError when that language's report is
+        already present.
+        """
+        self._require_completed_for_customer_save()
+
+        reports_dir = Path(self.session.recovery_path) / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+
+        report_path = reports_dir / customer_report_plaintext_filename(
+            self.language
+        )
+        if report_path.exists():
+            raise FileExistsError(
+                f"Customer report already exists: {report_path}"
+            )
+
+        report_path.write_text(self.build_customer_plaintext(), encoding="utf-8")
+        return report_path
+
     def save_customer_report(self) -> Path:
         """
         Write the customer report as Markdown into the case reports directory.
 
         Creates the reports directory when it does not exist. The filename is
-        language-qualified (e.g. customer_report.en.md). Raises FileExistsError
-        when that language's report is already present, so each language version
-        has independent overwrite protection.
+        language-qualified (e.g. customer_report.en.md). Raises
+        CustomerReportNotCompletedError when the persisted case is not
+        COMPLETED. Raises FileExistsError when that language's report is
+        already present, so each language version has independent overwrite
+        protection.
         """
+        self._require_completed_for_customer_save()
+
         reports_dir = Path(self.session.recovery_path) / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -846,6 +909,8 @@ class Hermes:
         before writing, so a failure never writes a partial file and never
         affects the Markdown report.
         """
+        self._require_completed_for_customer_save()
+
         reports_dir = Path(self.session.recovery_path) / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
 

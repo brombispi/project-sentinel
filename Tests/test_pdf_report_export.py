@@ -332,6 +332,14 @@ class BothFormatWorkflowTests(unittest.TestCase):
             "input": mock.Mock(return_value="y"),
             "log_info": mock.Mock(),
             "PdfReportError": PdfReportError,
+            "CustomerReportNotCompletedError": __import__(
+                "modules.hermes",
+                fromlist=["CustomerReportNotCompletedError"],
+            ).CustomerReportNotCompletedError,
+            "ManifestError": __import__(
+                "modules.manifest",
+                fromlist=["ManifestError"],
+            ).ManifestError,
             "_confirmed_yes": lambda response: response.strip().lower() in ("y", "j"),
             "_prompt_report_language": mock.Mock(return_value="en"),
             "_prompt_report_format": mock.Mock(return_value=report_format),

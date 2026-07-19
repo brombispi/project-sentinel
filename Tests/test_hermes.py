@@ -24,12 +24,15 @@ from modules.echo import AuditLogError
 from modules.hermes import (
     CUSTOMER_POLICY_VERSION,
     CUSTOMER_REPORT_SECTIONS,
+    CustomerReportNotCompletedError,
     FINGERPRINT_ARTIFACT_RELATIVE_PATH,
     Hermes,
     IMAGE_ARTIFACT_RELATIVE_PATH,
     MAP_ARTIFACT_RELATIVE_PATH,
     TECHNICIAN_REPORT_SECTIONS,
     customer_report_filename,
+    customer_report_plaintext_filename,
+    customer_report_pdf_filename,
     technician_report_filename,
 )
 from modules.manifest import ManifestError
@@ -1799,6 +1802,217 @@ class HermesCustomerReportTests(unittest.TestCase):
                 report_path.read_text(encoding="utf-8"),
                 hermes.build_customer_markdown(),
             )
+
+    def test_markdown_save_refused_for_non_completed_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            manifest = _populated_manifest()
+            manifest["status"] = "READY_FOR_RECOVERY"
+            _write_manifest(case_dir, manifest)
+            hermes = Hermes(_session(case_dir, status="READY_FOR_RECOVERY"))
+
+            with self.assertRaises(CustomerReportNotCompletedError):
+                hermes.save_customer_report()
+
+            reports_dir = case_dir / "reports"
+            report_path = reports_dir / customer_report_filename("en")
+            self.assertFalse(reports_dir.exists())
+            self.assertFalse(report_path.exists())
+
+    def test_markdown_save_does_not_modify_existing_file_on_refusal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            manifest = _populated_manifest()
+            manifest["status"] = "READY_FOR_RECOVERY"
+            _write_manifest(case_dir, manifest)
+            reports_dir = case_dir / "reports"
+            reports_dir.mkdir()
+            report_path = reports_dir / customer_report_filename("en")
+            original_content = "ORIGINAL_CUSTOMER_MARKDOWN_CONTENT\n"
+            report_path.write_text(original_content, encoding="utf-8")
+            hermes = Hermes(_session(case_dir, status="READY_FOR_RECOVERY"))
+
+            with self.assertRaises(CustomerReportNotCompletedError):
+                hermes.save_customer_report()
+
+            self.assertEqual(report_path.read_text(encoding="utf-8"), original_content)
+
+
+CUSTOMER_EXCLUSION_MARKERS = (
+    "/dev/sdb",
+    "S4EWNF0M803123A",
+    "SATA",
+    "ext4",
+    "EXTERNAL DEVICE",
+    "Customer SSD Recovery",
+    "COMPLETED",
+    "APPROVED",
+    "LOW",
+    "DataMedic",
+    "jane@example.com",
+    "+49 170 0000000",
+    "SHA-256",
+    "ddrescue",
+    "PhotoRec",
+    "TestDisk",
+    "audit.log",
+    "recovered/recup",
+    "completed_canonical",
+    "incomplete_ddrescue",
+)
+
+
+class HermesCustomerPlaintextTests(unittest.TestCase):
+    def setUp(self):
+        self._previous_language = get_language()
+        set_language("en", persist=False)
+        self.datetime_patcher = mock.patch(
+            "modules.hermes.datetime",
+            wraps=datetime,
+        )
+        self.mock_datetime = self.datetime_patcher.start()
+        self.mock_datetime.now.return_value = FIXED_GENERATED_AT
+
+    def tearDown(self):
+        self.datetime_patcher.stop()
+        set_language(self._previous_language, persist=False)
+
+    def _completed_manifest(self, session_id="REC-2026-000001", outcome="SUCCESSFUL"):
+        manifest = _populated_manifest(session_id)
+        manifest["completed_at"] = "2026-07-17T09:00:00"
+        manifest["recovery_outcome"] = outcome
+        manifest["intake"]["previous_recovery_attempts"] = (
+            "Sent to another lab called DataMedic first"
+        )
+        return manifest
+
+    def test_plaintext_formatter_structure(self):
+        report = {
+            "Case Information": {
+                "Case Number": "REC-1",
+                "Case Completed": "2026-07-17T09:00:00",
+            },
+            "Recommendations": {
+                "Guidance": ("First tip", "Second tip"),
+                "Policy Version": "1.0",
+            },
+        }
+        text = ReportFormatter().format_plaintext(
+            "Customer Report",
+            report,
+            section_order=tuple(report.keys()),
+        )
+
+        self.assertTrue(text.startswith("Customer Report\n\nCase Information\n"))
+        self.assertIn("Case Number: REC-1\n", text)
+        self.assertIn("Guidance:\n- First tip\n- Second tip\n", text)
+        self.assertNotIn("#", text)
+
+    def test_plaintext_has_no_markdown_heading_markers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            plaintext = Hermes(_session(case_dir)).build_customer_plaintext()
+
+            self.assertNotIn("#", plaintext)
+            self.assertTrue(plaintext.startswith("Customer Report\n\n"))
+
+    def test_english_plaintext_includes_completed_at_and_outcome(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            plaintext = Hermes(_session(case_dir)).build_customer_plaintext()
+
+            self.assertIn("Case Completed: 2026-07-17T09:00:00", plaintext)
+            self.assertIn(
+                "Outcome: The requested data was recovered successfully.",
+                plaintext,
+            )
+
+    def test_german_plaintext_includes_completed_at_and_outcome(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            plaintext = Hermes(_session(case_dir), "de").build_customer_plaintext()
+
+            self.assertTrue(plaintext.startswith("Kundenbericht\n\n"))
+            self.assertIn("Fall abgeschlossen: 2026-07-17T09:00:00", plaintext)
+            self.assertIn(
+                "Ergebnis: Die angeforderten Daten wurden erfolgreich "
+                "wiederhergestellt.",
+                plaintext,
+            )
+
+    def test_plaintext_save_refused_for_non_completed_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            manifest = _populated_manifest()
+            manifest["status"] = "READY_FOR_RECOVERY"
+            _write_manifest(case_dir, manifest)
+            hermes = Hermes(_session(case_dir, status="READY_FOR_RECOVERY"))
+
+            with self.assertRaises(CustomerReportNotCompletedError):
+                hermes.save_customer_plaintext()
+
+            report_path = case_dir / "reports" / customer_report_plaintext_filename(
+                "en"
+            )
+            self.assertFalse(report_path.exists())
+
+    def test_plaintext_save_succeeds_for_completed_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            hermes = Hermes(_session(case_dir))
+
+            report_path = hermes.save_customer_plaintext()
+
+            expected_path = case_dir / "reports" / customer_report_plaintext_filename(
+                "en"
+            )
+            self.assertEqual(report_path, expected_path)
+            self.assertEqual(
+                report_path.read_text(encoding="utf-8"),
+                hermes.build_customer_plaintext(),
+            )
+
+    def test_pdf_save_refused_for_non_completed_manifest(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            manifest = _populated_manifest()
+            manifest["status"] = "READY_FOR_RECOVERY"
+            _write_manifest(case_dir, manifest)
+            hermes = Hermes(_session(case_dir, status="READY_FOR_RECOVERY"))
+
+            with self.assertRaises(CustomerReportNotCompletedError):
+                hermes.save_customer_pdf()
+
+            report_path = case_dir / "reports" / customer_report_pdf_filename("en")
+            self.assertFalse(report_path.exists())
+
+    def test_customer_plaintext_exclusion_regression(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            plaintext = Hermes(_session(case_dir)).build_customer_plaintext()
+
+            for marker in CUSTOMER_EXCLUSION_MARKERS:
+                with self.subTest(marker=marker):
+                    self.assertNotIn(marker, plaintext)
+
+    def test_build_customer_report_structured_model_unchanged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_dir = _case_dir(temp_dir)
+            _write_manifest(case_dir, self._completed_manifest())
+            hermes = Hermes(_session(case_dir))
+
+            report = hermes.build_customer_report()
+            plaintext = hermes.build_customer_plaintext()
+            markdown = hermes.build_customer_markdown()
+
+            self.assertEqual(list(report.keys()), list(CUSTOMER_REPORT_SECTIONS))
+            self.assertIn("Case Completed: 2026-07-17T09:00:00", plaintext)
+            self.assertTrue(markdown.startswith("# Customer Report\n"))
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ from modules.echo import (
     log_error,
     set_log_failure_handler,
 )
-from modules.hermes import Hermes
+from modules.hermes import CustomerReportNotCompletedError, Hermes
 from modules.pdf_report_formatter import PdfReportError
 from modules.manifest import ManifestError, read_case_manifest, write_initial_case_manifest
 from modules.session_manager import (
@@ -1405,6 +1405,39 @@ def _prompt_report_format():
         print(tr("validation.invalid_selection"))
 
 
+def _prompt_customer_report_format():
+    """
+    Prompt the operator for a customer report format.
+
+    Defaults to plain text (Enter accepts it). Returns one of "plaintext",
+    "pdf", or "both".
+    """
+    print()
+    print(tr("report.format.customer.prompt.title"))
+    print(tr("report.format.customer.option.plaintext"))
+    print(tr("report.format.customer.option.pdf"))
+    print(tr("report.format.customer.option.both"))
+
+    while True:
+        choice = input(
+            tr(
+                "report.format.customer.prompt.select",
+                default=tr("report.format.customer.default"),
+            )
+        ).strip().lower()
+
+        if choice == "":
+            return "plaintext"
+        if choice in ("1", "plaintext", "plain", "text", "txt"):
+            return "plaintext"
+        if choice in ("2", "pdf"):
+            return "pdf"
+        if choice in ("3", "both"):
+            return "both"
+
+        print(tr("validation.invalid_selection"))
+
+
 def _save_report_format(session, save_report, language, saved_path_key, log_label):
     """
     Save one report in one format and report the result independently.
@@ -1423,6 +1456,14 @@ def _save_report_format(session, save_report, language, saved_path_key, log_labe
     except PdfReportError as error:
         print()
         print(tr(error.message_key))
+        return
+    except CustomerReportNotCompletedError:
+        print()
+        print(tr("report.error.customer_not_completed"))
+        return
+    except ManifestError:
+        print()
+        print(tr("report.error.manifest_read_failed"))
         return
 
     print()
@@ -1471,8 +1512,45 @@ def _offer_report_generation(
         )
 
 
+def _offer_customer_report_generation(session):
+    report_confirm = input(tr("report.prompt.generate_customer")).strip().lower()
+
+    if not _confirmed_yes(report_confirm):
+        return
+
+    language = _prompt_report_language()
+    report_format = _prompt_customer_report_format()
+
+    if report_format in ("plaintext", "both"):
+        _save_report_format(
+            session,
+            lambda selected_language: Hermes(
+                session, selected_language
+            ).save_customer_plaintext(),
+            language,
+            "report.label.saved_path_customer_plaintext",
+            "Customer plain-text report saved",
+        )
+
+    if report_format in ("pdf", "both"):
+        _save_report_format(
+            session,
+            lambda selected_language: Hermes(
+                session, selected_language
+            ).save_customer_pdf(),
+            language,
+            "report.pdf.label.saved_path_customer",
+            "Customer report PDF saved",
+        )
+
+
 def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None):
-    if recovery_result is None or not recovery_result["success"]:
+    try:
+        manifest = read_case_manifest(session.recovery_path)
+    except ManifestError:
+        return
+
+    if manifest.get("status") != RecoveryStatus.COMPLETED:
         return
 
     _offer_report_generation(
@@ -1486,16 +1564,7 @@ def _run_delivery_workflow(session, assessment, intake, *, recovery_result=None)
         "Technician report PDF saved",
     )
 
-    _offer_report_generation(
-        session,
-        "report.prompt.generate_customer",
-        lambda language: Hermes(session, language).save_customer_report(),
-        lambda language: Hermes(session, language).save_customer_pdf(),
-        "report.label.saved_path_customer",
-        "report.pdf.label.saved_path_customer",
-        "Customer report saved",
-        "Customer report PDF saved",
-    )
+    _offer_customer_report_generation(session)
 
 
 def _parse_recovery_outcome(choice):

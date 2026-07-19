@@ -487,6 +487,9 @@ class ReportLanguagePromptTests(unittest.TestCase):
 
 class IndependentReportLanguageSelectionTests(unittest.TestCase):
     def _load_delivery(self):
+        from core.status import RecoveryStatus
+        from modules.hermes import CustomerReportNotCompletedError
+        from modules.manifest import ManifestError
         from modules.pdf_report_formatter import PdfReportError
 
         namespace = {
@@ -497,19 +500,26 @@ class IndependentReportLanguageSelectionTests(unittest.TestCase):
             "log_info": mock.Mock(),
             "Hermes": mock.Mock(),
             "PdfReportError": PdfReportError,
+            "CustomerReportNotCompletedError": CustomerReportNotCompletedError,
+            "ManifestError": ManifestError,
+            "RecoveryStatus": RecoveryStatus,
+            "read_case_manifest": mock.Mock(
+                return_value={"status": RecoveryStatus.COMPLETED}
+            ),
             "_prompt_report_language": mock.Mock(),
-            # Format selection is independent of language; default to Markdown
-            # so this test isolates the independent-language behavior.
             "_prompt_report_format": mock.Mock(return_value="markdown"),
+            "_prompt_customer_report_format": mock.Mock(return_value="plaintext"),
         }
         _load_sentinel_function("_save_report_format", namespace)
         _load_sentinel_function("_offer_report_generation", namespace)
+        _load_sentinel_function("_offer_customer_report_generation", namespace)
         delivery = _load_sentinel_function("_run_delivery_workflow", namespace)
         return delivery, namespace
 
     def test_technician_and_customer_use_independent_languages(self):
         delivery, namespace = self._load_delivery()
         session = mock.Mock()
+        session.recovery_path = "/tmp/recovery"
         namespace["input"].side_effect = ["y", "y"]
         namespace["_prompt_report_language"].side_effect = ["en", "de"]
 
