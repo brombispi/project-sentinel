@@ -94,6 +94,10 @@
     "aegis.label.reason": "Grund      :",
     "aegis.reason.recovery_engine": "Ziel ist die Recovery Engine.",
     "aegis.reason.external_device": "Externes Gerät.",
+    "aegis.reason.mounted_source": "Quellgerät ist derzeit eingebunden.",
+    "aegis.reason.unidentified_source": "Die Identität des Quellgeräts ist nicht vertrauenswürdig.",
+    "aegis.recommendation.unmounted_source": "Quellgerät vor dem Fortfahren aushängen.",
+    "aegis.recommendation.unidentified_source": "Physisches Quellgerät prüfen und eine vertrauenswürdige Seriennummer ermitteln, bevor Sie fortfahren.",
 
     "oracle.label.goal": "Ziel       :",
     "oracle.label.priority": "Priorität  :",

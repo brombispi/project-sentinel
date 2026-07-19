@@ -94,6 +94,10 @@
     "aegis.label.reason": "Reason     :",
     "aegis.reason.recovery_engine": "Target is the Recovery Engine.",
     "aegis.reason.external_device": "External device.",
+    "aegis.reason.mounted_source": "Source device is currently mounted.",
+    "aegis.reason.unidentified_source": "Source device identity cannot be trusted.",
+    "aegis.recommendation.unmounted_source": "Unmount the source device before continuing.",
+    "aegis.recommendation.unidentified_source": "Verify the physical source device and obtain a trustworthy serial before continuing.",
 
     "oracle.label.goal": "Goal       :",
     "oracle.label.priority": "Priority   :",

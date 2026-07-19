@@ -393,11 +393,29 @@ def display_aegis_reason(reason):
     mapping = {
         "Target is the Recovery Engine.": "aegis.reason.recovery_engine",
         "External device.": "aegis.reason.external_device",
+        "Source device is currently mounted.": "aegis.reason.mounted_source",
+        "Source device identity cannot be trusted.": (
+            "aegis.reason.unidentified_source"
+        ),
     }
     key = mapping.get(reason)
     if key:
         return tr(key)
     return reason
+
+
+def display_aegis_recommendation(recommendation):
+    mapping = {
+        "Unmount the source device before continuing.": (
+            "aegis.recommendation.unmounted_source"
+        ),
+        "Verify the physical source device and obtain a trustworthy "
+        "serial before continuing.": "aegis.recommendation.unidentified_source",
+    }
+    key = mapping.get(recommendation)
+    if key:
+        return tr(key)
+    return recommendation
 
 
 def display_janus_reason(assessment, mount_point=None):
@@ -452,6 +470,9 @@ def display_oracle_step(step, recommendation=None):
     key = mapping.get(step)
     if key:
         return tr(key)
+    displayed = display_aegis_recommendation(step)
+    if displayed != step:
+        return displayed
     if recommendation is not None and step == recommendation:
         return tr("oracle.step.recommendation", recommendation=step)
     return step

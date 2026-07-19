@@ -16,6 +16,9 @@ from i18n.translator import (
     DEFAULT_LANGUAGE,
     _catalogs,
     config_path,
+    display_aegis_reason,
+    display_aegis_recommendation,
+    display_oracle_step,
     get_language,
     init_language,
     operator_message,
@@ -279,6 +282,83 @@ class TranslatorTests(unittest.TestCase):
     def test_sentinel_does_not_branch_on_translated_text(self):
         self.assertNotIn('if tr("', SENTINEL_SOURCE)
         self.assertNotIn("== tr(", SENTINEL_SOURCE)
+
+
+class AegisDisplayTests(unittest.TestCase):
+    def setUp(self):
+        self._env_patch = mock.patch.dict(os.environ, {}, clear=True)
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        init_language(SOURCE_ROOT)
+
+    def test_sl_008_reason_and_recommendation_localized_en(self):
+        set_language("en", persist=False)
+        self.assertEqual(
+            display_aegis_reason("Source device is currently mounted."),
+            "Source device is currently mounted.",
+        )
+        self.assertEqual(
+            display_aegis_recommendation(
+                "Unmount the source device before continuing."
+            ),
+            "Unmount the source device before continuing.",
+        )
+
+    def test_sl_008_reason_and_recommendation_localized_de(self):
+        set_language("de", persist=False)
+        self.assertEqual(
+            display_aegis_reason("Source device is currently mounted."),
+            "Quellgerät ist derzeit eingebunden.",
+        )
+        self.assertEqual(
+            display_aegis_recommendation(
+                "Unmount the source device before continuing."
+            ),
+            "Quellgerät vor dem Fortfahren aushängen.",
+        )
+
+    def test_sl_003_reason_and_recommendation_localized_en(self):
+        set_language("en", persist=False)
+        self.assertEqual(
+            display_aegis_reason("Source device identity cannot be trusted."),
+            "Source device identity cannot be trusted.",
+        )
+        self.assertEqual(
+            display_aegis_recommendation(
+                "Verify the physical source device and obtain a trustworthy "
+                "serial before continuing."
+            ),
+            "Verify the physical source device and obtain a trustworthy "
+            "serial before continuing.",
+        )
+
+    def test_sl_003_reason_and_recommendation_localized_de(self):
+        set_language("de", persist=False)
+        self.assertEqual(
+            display_aegis_reason("Source device identity cannot be trusted."),
+            "Die Identität des Quellgeräts ist nicht vertrauenswürdig.",
+        )
+        self.assertEqual(
+            display_aegis_recommendation(
+                "Verify the physical source device and obtain a trustworthy "
+                "serial before continuing."
+            ),
+            "Physisches Quellgerät prüfen und eine vertrauenswürdige "
+            "Seriennummer ermitteln, bevor Sie fortfahren.",
+        )
+
+    def test_oracle_step_display_uses_aegis_recommendation_mapping(self):
+        set_language("de", persist=False)
+        self.assertEqual(
+            display_oracle_step(
+                "Verify the physical source device and obtain a trustworthy "
+                "serial before continuing."
+            ),
+            "Physisches Quellgerät prüfen und eine vertrauenswürdige "
+            "Seriennummer ermitteln, bevor Sie fortfahren.",
+        )
 
 
 class SentinelLocalizationRegressionTests(unittest.TestCase):
